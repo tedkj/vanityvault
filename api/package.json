@@ -1,0 +1,13 @@
+{
+  "name": "vanityvault-api",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local"
+  },
+  "devDependencies": {
+    "wrangler": "^4.160.0"
+  }
+}

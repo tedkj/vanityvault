@@ -1,0 +1,22 @@
+{
+  "name": "vanityvault-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  // The workers.dev address keeps working, for app builds made before the domain existed.
+  "workers_dev": true,
+  "routes": [{ "pattern": "api.vanityvault.no", "custom_domain": true }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vanityvault",
+      // The real database. Local runs and the tests use a throwaway copy instead.
+      "database_id": "81519bfc-3f35-451c-b4d1-e170535e2c5b",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Per sender address, per minute.
+  "ratelimits": [
+    { "name": "RL_AUTH", "namespace_id": "4101", "simple": { "limit": 30, "period": 60 } },
+    { "name": "RL_API", "namespace_id": "4102", "simple": { "limit": 300, "period": 60 } }
+  ]
+}

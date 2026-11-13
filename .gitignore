@@ -1,0 +1,26 @@
+# Private keys: a Solana keypair file is a JSON array, so no JSON file goes in unless listed below.
+*.json
+!**/package.json
+!**/package-lock.json
+!**/tsconfig.json
+!app/src-tauri/tauri.conf.json
+!app/src-tauri/capabilities/*.json
+found.txt
+recovered/
+
+# Build output, caches and local tool state
+node_modules/
+dist/
+target/
+.astro/
+.wrangler/
+.cloudflare/
+app/src-tauri/gen/
+__pycache__/
+*.pyc
+*.exe
+_kernel_dump.*
+
+# Secrets
+.env*
+.dev.vars

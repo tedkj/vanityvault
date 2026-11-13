@@ -1,0 +1,33 @@
+[package]
+name = "vanityvault"
+version = "0.2.2-preview"
+edition = "2021"
+description = "Finds Solana vanity addresses on your own PC"
+license = "AGPL-3.0-only"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+ed25519-dalek = "2"
+bs58 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
+serde_json = "1"
+argon2 = "0.5"
+hkdf = "0.12"
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+zxcvbn = "3"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+opencl3 = { version = "0.12", default-features = false, features = ["dynamic", "CL_VERSION_1_2"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory"] }
+
+[profile.release]
+lto = "thin"
+strip = true
