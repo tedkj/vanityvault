@@ -3,10 +3,30 @@
   import { big } from '../lib/format';
   import Addr from '../lib/Addr.svelte';
   import DeleteAll from '../lib/DeleteAll.svelte';
+  import { prefs, type VaultSort } from '../lib/prefs';
 
   let { entries, onHunt, onChanged, onDeleted }: { entries: Entry[]; onHunt: () => void; onChanged: () => void; onDeleted: () => void } =
     $props();
   let wiping = $state(false);
+
+  // The order of the list. The word of a key is the part that was hunted for: the longer of its
+  // start and its end.
+  let sort = $state<VaultSort>(prefs.vaultSort);
+  // Typing here keeps only the keys whose address has those characters in it, in either case.
+  let look = $state('');
+  function order(by: VaultSort) {
+    sort = by;
+    prefs.vaultSort = by;
+  }
+  const word = (e: Entry) => (e.prefixLen >= e.suffixLen ? e.address.slice(0, e.prefixLen) : e.address.slice(e.address.length - e.suffixLen));
+  const shown = $derived.by(() => {
+    const newest = (a: Entry, b: Entry) => b.at - a.at;
+    const az = (a: Entry, b: Entry) => word(a).toLowerCase().localeCompare(word(b).toLowerCase()) || newest(a, b);
+    const longest = (a: Entry, b: Entry) => word(b).length - word(a).length || az(a, b);
+    const want = look.trim().toLowerCase();
+    const some = want ? entries.filter((e) => e.address.toLowerCase().includes(want)) : [...entries];
+    return some.sort(sort === 'longest' ? longest : sort === 'az' ? az : newest);
+  });
 
   // One key at a time can be open for an action.
   let open = $state<{ address: string; kind: 'secret' | 'saved' | 'delete' | 'error'; text: string } | null>(null);
@@ -61,8 +81,21 @@
     <button class="btn pri" style="margin-top:28px" onclick={onHunt}>Start a hunt</button>
   {:else}
     <p class="lead">Stored on this PC in one encrypted file. To use an address in a wallet, show its secret key or save its key file.</p>
+    {#if entries.length > 1}
+      <div class="sort">
+        <span class="label">Sort</span>
+        <div class="seg">
+          <button class:on={sort === 'newest'} onclick={() => order('newest')}>Newest</button>
+          <button class:on={sort === 'longest'} onclick={() => order('longest')}>Longest word</button>
+          <button class:on={sort === 'az'} onclick={() => order('az')}>Word A to Z</button>
+        </div>
+        <input class="look mono" bind:value={look} placeholder="Find in addresses" maxlength="44" spellcheck="false" autocomplete="off" />
+        {#if look.trim()}<span class="count mono">{shown.length} of {entries.length}</span>{/if}
+      </div>
+    {/if}
+    {#if look.trim() && shown.length === 0}<p class="none">No address in the vault has "{look.trim()}" in it.</p>{/if}
     <div class="list">
-      {#each entries as e (e.address)}
+      {#each shown as e (e.address)}
         {@const mine = open?.address === e.address ? open : null}
         <div class="item" class:active={!!mine}>
           <div class="a mono"><Addr address={e.address} prefixLen={e.prefixLen} suffixLen={e.suffixLen} /></div>
@@ -119,6 +152,65 @@
 
 <style>
   h1 {
+    margin-top: 14px;
+  }
+  .sort {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 26px;
+  }
+  .seg {
+    display: flex;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    padding: 3px;
+  }
+  .seg button {
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 7px 12px;
+    border-radius: 8px;
+    color: var(--mute);
+    transition:
+      background 0.2s,
+      color 0.2s;
+  }
+  .seg button.on {
+    background: rgba(255, 255, 255, 0.09);
+    color: var(--text);
+  }
+  .sort {
+    flex-wrap: wrap;
+    max-width: 920px;
+  }
+  .look {
+    height: 38px;
+    width: 210px;
+    margin-left: auto;
+    padding: 0 13px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: var(--ink2);
+    font-size: 12.5px;
+    outline: 0;
+    user-select: text;
+    transition: border-color 0.2s;
+  }
+  .look:focus {
+    border-color: rgba(20, 241, 149, 0.45);
+  }
+  .count {
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .none {
+    margin-top: 18px;
+    color: var(--mute);
+    font-size: 14.5px;
+  }
+  .sort + .list,
+  .none + .list {
     margin-top: 14px;
   }
   .list {

@@ -11,6 +11,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -24,6 +25,9 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 const FORMAT: u32 = 1;
+/// Hunt list finds that come within this long of the last save wait for the next one, so a
+/// burst of hundreds of finds is one write of the file and not hundreds (see `add_soon`).
+const SAVE_GAP: Duration = Duration::from_secs(1);
 const MIN_SCORE: u8 = 3;
 pub(crate) const RECOVERY_BYTES: usize = 20;
 const B32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -96,6 +100,10 @@ struct Open {
     file: VaultFile,
     key: Secret,
     entries: Vec<Stored>,
+    /// How many keys are in the open vault but not in the file yet, and when the file was last
+    /// written by `save`.
+    unsaved: usize,
+    saved_at: Option<Instant>,
 }
 
 pub struct Vault {
@@ -319,7 +327,7 @@ impl Vault {
             entries: Vec::new(),
         };
         Self::write(&self.path, &file)?;
-        self.open = Some(Open { file, key, entries: Vec::new() });
+        self.open = Some(Open { file, key, entries: Vec::new(), unsaved: 0, saved_at: None });
         Ok(recovery_text(&recovery))
     }
 
@@ -330,7 +338,7 @@ impl Vault {
             .and_then(|k| to_secret(&k))
             .ok_or("Wrong password.")?;
         let entries = Self::load_entries(&file, &key)?;
-        self.open = Some(Open { file, key, entries });
+        self.open = Some(Open { file, key, entries, unsaved: 0, saved_at: None });
         Ok(())
     }
 
@@ -349,7 +357,7 @@ impl Vault {
         let kek = derive(&master_key(new_password, &file.kdf)?[..], "vanityvault/v1/kek");
         file.key_by_password = seal(&kek, &aad(&file.vault_id, "key/password"), &key[..]);
         Self::write(&self.path, &file)?;
-        self.open = Some(Open { file, key, entries });
+        self.open = Some(Open { file, key, entries, unsaved: 0, saved_at: None });
         Ok(())
     }
 
@@ -368,8 +376,17 @@ impl Vault {
         fs::remove_file(&self.path).map_err(|e| format!("Could not delete the vault file: {e}"))
     }
 
-    /// Forgets the vault key and every decrypted secret.
+    /// Writes the open vault to its file. Every waiting key goes with it.
+    fn save(path: &Path, o: &mut Open) -> Result<(), String> {
+        Self::write(path, &o.file)?;
+        o.unsaved = 0;
+        o.saved_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Forgets the vault key and every decrypted secret, after writing any keys still waiting.
     pub fn lock(&mut self) {
+        let _ = self.flush();
         self.open = None;
     }
 
@@ -387,7 +404,45 @@ impl Vault {
         let sealed = seal(&o.key, &aad(&o.file.vault_id, &format!("entry/{id}")), &entry.plain());
         o.file.entries.push(FileEntry { id: id.clone(), sealed });
         o.entries.push(Stored { id, entry });
-        Self::write(&path, &o.file)
+        Self::save(&path, o)
+    }
+
+    /// Like `add`, for hunt list finds, which can come hundreds at a time. The key is in the open
+    /// vault at once. The file is written at once too, unless it was written less than
+    /// `SAVE_GAP` ago: then the key waits, in memory only, for `save_due`, `flush` or any other
+    /// change to the vault. A crash in that time loses the waiting keys, which nobody has used yet.
+    pub fn add_soon(&mut self, entry: Entry) -> Result<(), String> {
+        let path = self.path.clone();
+        let o = self.open.as_mut().ok_or("The vault is locked.")?;
+        if o.entries.iter().any(|s| s.entry.view.address == entry.view.address) {
+            return Ok(());
+        }
+        let id = hex(&random::<8>());
+        let sealed = seal(&o.key, &aad(&o.file.vault_id, &format!("entry/{id}")), &entry.plain());
+        o.file.entries.push(FileEntry { id: id.clone(), sealed });
+        o.entries.push(Stored { id, entry });
+        o.unsaved += 1;
+        if o.saved_at.is_some_and(|t| t.elapsed() < SAVE_GAP) {
+            return Ok(());
+        }
+        Self::save(&path, o)
+    }
+
+    /// Writes the waiting keys, if there are any and the last save is `SAVE_GAP` or more ago.
+    /// A running hunt calls this a few times a second.
+    pub fn save_due(&mut self) -> Result<(), String> {
+        match &mut self.open {
+            Some(o) if o.unsaved > 0 && !o.saved_at.is_some_and(|t| t.elapsed() < SAVE_GAP) => Self::save(&self.path, o),
+            _ => Ok(()),
+        }
+    }
+
+    /// Writes the waiting keys now, if there are any.
+    pub fn flush(&mut self) -> Result<(), String> {
+        match &mut self.open {
+            Some(o) if o.unsaved > 0 => Self::save(&self.path, o),
+            _ => Ok(()),
+        }
     }
 
     /// Adds several keys with one write of the file. Keys already in the vault are passed over.
@@ -407,7 +462,7 @@ impl Vault {
             added += 1;
         }
         if added > 0 {
-            Self::write(&path, &o.file)?;
+            Self::save(&path, o)?;
         }
         Ok(added)
     }
@@ -454,6 +509,6 @@ impl Vault {
         let i = o.entries.iter().position(|s| s.entry.view.address == address).ok_or("That key is not in the vault.")?;
         let gone = o.entries.remove(i);
         o.file.entries.retain(|fe| fe.id != gone.id);
-        Self::write(&path, &o.file)
+        Self::save(&path, o)
     }
 }

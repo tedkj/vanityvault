@@ -1,5 +1,8 @@
 // Small per-PC preferences, kept in the window's own storage. Nothing secret goes here.
 const AUTO = 'vv.autoBackup';
+const SORT = 'vv.vaultSort';
+
+export type VaultSort = 'newest' | 'longest' | 'az';
 
 function read(key: string): string | null {
   try {
@@ -23,5 +26,13 @@ export const prefs = {
   },
   set autoBackup(on: boolean) {
     write(AUTO, on ? '1' : '0');
+  },
+  /** The order the vault lists its keys in. Newest first unless chosen. */
+  get vaultSort(): VaultSort {
+    const v = read(SORT);
+    return v === 'longest' || v === 'az' ? v : 'newest';
+  },
+  set vaultSort(order: VaultSort) {
+    write(SORT, order);
   },
 };

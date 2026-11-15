@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { engine, type About, type Hit } from '../lib/engine';
   import { big, wait, clock } from '../lib/format';
   import Addr from '../lib/Addr.svelte';
   import Chips from '../lib/Chips.svelte';
+  import { ping, type PingSound } from '../lib/ping';
 
   let { about, onOpenVault }: { about: About; onOpenVault: () => void } = $props();
 
@@ -19,6 +21,11 @@
   let listOpen = $state(!!saved().trim());
   let words = $state(0);
   let listMean = $state(0);
+  // How many list finds to expect in the first half minute, to warn before short words fill the vault.
+  let soon = $state(0);
+  const SOON_SECONDS = 30;
+  const FLOOD = 100;
+  let saveErr = $state('');
   let finds = $state<Hit[]>([]);
   let findCount = $state(0);
   let note = $state('');
@@ -33,6 +40,52 @@
   let copied = $state(false);
   let onGpu = $state(false);
 
+  // The ping: a sound when something is found. It has to be switched on in each hunt, and it
+  // sounds at most once every 10 seconds, so a burst of short words is one ping, not two hundred.
+  const PING_GAP = 10_000;
+  let pingOn = $state(false);
+  let pingSound = $state<PingSound>('soft');
+  let pingMinOn = $state(false);
+  let pingMin = $state(6);
+  let lastPing = 0;
+  let pingTimer = 0;
+  function hush() {
+    clearTimeout(pingTimer);
+    pingTimer = 0;
+  }
+  /** A find of a word this long. The main pattern always counts and is never held back. */
+  function rang(len: number, main = false) {
+    if (!pingOn) return;
+    if (main) {
+      hush();
+      lastPing = Date.now();
+      return ping(pingSound);
+    }
+    if (pingMinOn && len < pingMin) return;
+    const left = lastPing + PING_GAP - Date.now();
+    if (left <= 0) {
+      lastPing = Date.now();
+      ping(pingSound);
+    } else if (!pingTimer) {
+      // Found during the quiet time: one ping when it is over.
+      pingTimer = window.setTimeout(() => {
+        pingTimer = 0;
+        lastPing = Date.now();
+        ping(pingSound);
+      }, left);
+    }
+  }
+  // Switching it on, or picking a sound, plays it once so you hear what you chose.
+  function setPing(on: boolean) {
+    pingOn = on;
+    if (on) ping(pingSound);
+    else hush();
+  }
+  function setSound(s: PingSound) {
+    pingSound = s;
+    ping(s);
+  }
+
   // Live estimate while typing. The Rust core owns the math and the rules.
   $effect(() => {
     const s = start;
@@ -40,16 +93,19 @@
     const c = anyCase;
     const l = list;
     keep(l);
+    // Before the first hunt the speed is a guess: a graphics card, or the processor alone.
+    // Read without watching, or every speed update of a running hunt would ask for a new estimate.
+    const speed = untrack(() => lastRate || (about.card.state === 'ready' ? 5e7 : 1e6));
     if (!s && !e && !l.trim()) {
-      mean = words = listMean = 0;
+      mean = words = listMean = soon = 0;
       err = '';
       return;
     }
     let live = true;
     engine
-      .estimate(s, e, c, l)
-      .then((m) => live && (({ mean, words, listMean } = m), (err = '')))
-      .catch((x) => live && ((mean = words = listMean = 0), (err = String(x))));
+      .estimate(s, e, c, l, speed * SOON_SECONDS)
+      .then((m) => live && (({ mean, words, listMean, soon } = m), (err = '')))
+      .catch((x) => live && ((mean = words = listMean = soon = 0), (err = String(x))));
     return () => (live = false);
   });
 
@@ -80,6 +136,7 @@
       tried = t.tried;
       elapsedMs = t.elapsedMs;
       onGpu = t.gpu;
+      saveErr = t.vaultError;
       if (t.rate > 0) {
         rate = t.rate;
         lastRate = t.rate;
@@ -89,14 +146,17 @@
     const offHit = engine.onHit((h) => {
       found = h;
       phase = 'found';
+      rang(Math.max(h.prefixLen, h.suffixLen), true);
     });
     const offFind = engine.onFind((h) => {
       finds = [h, ...finds].slice(0, 3);
       findCount = h.finds;
+      rang(Math.max(h.prefixLen, h.suffixLen));
     });
     const offEnd = engine.onEnd((n) => {
       note = `Every word on the hunt list was found at both ends. ${n} finds are in your vault.`;
       phase = 'idle';
+      hush();
     });
     return () => (offTick(), offHit(), offFind(), offEnd());
   });
@@ -136,6 +196,9 @@
       elapsedMs = 0;
       peak = 0;
       found = null;
+      hush();
+      pingOn = false;
+      lastPing = 0;
       onGpu = about.card.state === 'ready';
       phase = 'running';
     } catch (e) {
@@ -143,6 +206,7 @@
     }
   }
   async function stop() {
+    hush();
     await engine.stop();
     phase = 'idle';
   }
@@ -190,6 +254,9 @@
         {#if words}
           Hunt list: <b>{words}</b> {words === 1 ? 'word' : 'words'}, a find about every
           <b>{lastRate ? wait(listMean / lastRate).replace('about ', '') : `${big(listMean)} tries`}</b>.
+          {#if soon >= FLOOD}
+            <span class="flood">Heads up: about <b>{Math.round(soon).toLocaleString('en-US')}</b> of these will be found in the first half minute, and every find is a key in your vault.</span>
+          {/if}
         {/if}
       {:else if note}
         {note}
@@ -248,6 +315,7 @@
     </div>
     <div class="prog"><i style:width="{chance * 100}%"></i></div>
     <p class="fine">It is pure luck, so the bar is a chance, not a countdown. It can hit early or run past the end.</p>
+    {#if saveErr}<p class="hint err">{saveErr}</p>{/if}
 
     {#if words}
       <div class="finds">
@@ -260,7 +328,28 @@
       </div>
     {/if}
 
-    <button class="btn go" onclick={stop}>Stop</button>
+    <div class="stoprow">
+      <button class="btn go" onclick={stop}>Stop</button>
+
+      <div class="ping">
+        <label class="tick" title="At most one ping every 10 seconds. It is off again when the next hunt starts."><input type="checkbox" checked={pingOn} onchange={(e) => setPing(e.currentTarget.checked)} />Ping me when something is found</label>
+        {#if pingOn}
+          <div class="pingopts">
+            <div class="seg">
+              <button class:on={pingSound === 'soft'} onclick={() => setSound('soft')}>Soft</button>
+              <button class:on={pingSound === 'loud'} onclick={() => setSound('loud')}>Loud</button>
+            </div>
+            <label class="tick" title="Ping only for words with at least this many characters."><input type="checkbox" bind:checked={pingMinOn} />Only</label>
+            <span class="step" class:off={!pingMinOn}>
+              <button aria-label="Fewer characters" disabled={!pingMinOn || pingMin <= 3} onclick={() => pingMin--}>&minus;</button>
+              <b>{pingMin}</b>
+              <button aria-label="More characters" disabled={!pingMinOn || pingMin >= 10} onclick={() => pingMin++}>+</button>
+            </span>
+            <span class="unit" class:off={!pingMinOn}>or longer</span>
+          </div>
+        {/if}
+      </div>
+    </div>
   {:else if found}
     <div class="label">Found</div>
     <h1>There it <em class="s grad">is.</em></h1>
@@ -369,12 +458,98 @@
     background: rgba(255, 255, 255, 0.09);
     color: var(--text);
   }
+  /* Stop on the left, the ping on the right, so both show in the window's starting size. */
+  .stoprow {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 24px;
+    margin-top: 30px;
+    max-width: 880px;
+  }
+  .stoprow .go {
+    margin-top: 0;
+    flex: none;
+  }
+  /* The tick sits at the far right; its options open to the left of it, or under it when the
+     window is narrow. */
+  .ping {
+    display: flex;
+    flex-flow: row-reverse wrap;
+    align-items: center;
+    gap: 6px 22px;
+    min-width: 0;
+    min-height: 46px;
+  }
+  /* The pattern fields above style every label and input on this screen; undo that here. */
+  .ping .tick {
+    margin-top: 0;
+    flex: none;
+    min-width: 0;
+    flex-direction: row;
+    width: fit-content;
+  }
+  .ping .tick input {
+    width: 17px;
+    height: 17px;
+    flex: none;
+  }
+  .pingopts {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    white-space: nowrap;
+  }
+  .pingopts .seg {
+    margin: 0 6px 0 0;
+  }
+  .step {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    padding: 3px;
+  }
+  .step button {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    color: var(--mute);
+    font-size: 16px;
+    line-height: 1;
+  }
+  .step button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.09);
+    color: var(--text);
+  }
+  .step button:disabled {
+    opacity: 0.3;
+    cursor: default;
+  }
+  .step b {
+    min-width: 22px;
+    text-align: center;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .unit {
+    font-size: 14.5px;
+  }
+  .off {
+    opacity: 0.45;
+  }
   .hint {
     margin: 16px 4px 0;
     color: var(--mute);
     font-size: 14.5px;
     min-height: 22px;
     max-width: 880px;
+  }
+  .flood {
+    display: block;
+    margin-top: 6px;
+    color: #f5b83d;
   }
   .hint b {
     color: var(--text);

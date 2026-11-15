@@ -48,6 +48,9 @@ pub struct Estimate {
     /// Number of words in the hunt list, and the average tries between its finds.
     words: usize,
     list_mean: f64,
+    /// How many list finds to expect in the first stretch of the hunt (`soon_tries` keys), so the
+    /// UI can warn before a list of short words fills the vault.
+    soon: f64,
 }
 
 /// The main pattern and the hunt list as typed. At least one of them must be there.
@@ -60,11 +63,12 @@ fn plan(start: &str, end: &str, any_case: bool, list: &str) -> Result<(Option<Pa
     Ok((Some(Pattern::parse(start, end, any_case)?), words))
 }
 
-fn estimate(pat: &Option<Pattern>, words: &Option<Words>) -> Estimate {
+fn estimate(pat: &Option<Pattern>, words: &Option<Words>, soon_tries: f64) -> Estimate {
     Estimate {
         mean: pat.as_ref().map_or(0.0, Pattern::mean_tries),
         words: words.as_ref().map_or(0, Words::len),
         list_mean: words.as_ref().map_or(0.0, Words::mean_tries),
+        soon: words.as_ref().map_or(0.0, |w| w.soon(soon_tries)),
     }
 }
 
@@ -83,6 +87,8 @@ struct Tick {
     elapsed_ms: u64,
     /// True while the graphics card is doing the work.
     gpu: bool,
+    /// Empty unless writing waiting finds to the vault file just failed.
+    vault_error: String,
 }
 
 /// The graphics card as the UI sees it: "starting" while it is being set up and checked,
@@ -113,7 +119,7 @@ impl Default for Engine {
 }
 
 impl Engine {
-    fn stop(&self) {
+    pub(crate) fn stop(&self) {
         if let Some(run) = self.run.lock().unwrap().take() {
             run.store(false, Ordering::SeqCst);
         }
@@ -215,7 +221,13 @@ impl Hunt {
     /// Puts the key into the vault and tells the UI.
     fn keep(&self, event: &str, address: String, seed: Zeroizing<[u8; 32]>, prefix_len: usize, suffix_len: usize) {
         let view = EntryView { address, prefix_len, suffix_len, tries: self.tried.load(Ordering::Relaxed), at: now_ms() };
-        let saved = self.vault.lock().unwrap().add(Entry { view: view.clone(), seed });
+        // The main pattern's key is written at once. Hunt list finds can come in bursts, so the
+        // vault writes those at most once a second (`Vault::add_soon`).
+        let entry = Entry { view: view.clone(), seed };
+        let saved = {
+            let mut vault = self.vault.lock().unwrap();
+            if event == "hunt-hit" { vault.add(entry) } else { vault.add_soon(entry) }
+        };
         let finds = self.finds.load(Ordering::Relaxed);
         let hit = Hit { entry: view, saved: saved.is_ok(), error: saved.err().unwrap_or_default(), finds };
         let _ = self.app.emit(event, hit);
@@ -328,8 +340,14 @@ impl Hunt {
         loop {
             std::thread::sleep(Duration::from_millis(250));
             if !self.run.load(Ordering::Relaxed) {
+                // The hunt is over: write whatever finds are still waiting.
+                if let Err(vault_error) = self.vault.lock().unwrap().flush() {
+                    let tick = Tick { tried: self.tried.load(Ordering::Relaxed), rate: 0.0, elapsed_ms: t0.elapsed().as_millis() as u64, gpu: false, vault_error };
+                    let _ = self.app.emit("hunt-tick", tick);
+                }
                 break;
             }
+            let vault_error = self.vault.lock().unwrap().save_due().err().unwrap_or_default();
             let (now, now_t) = (self.tried.load(Ordering::Relaxed), Instant::now());
             if window.len() == 8 {
                 window.pop_front();
@@ -341,6 +359,7 @@ impl Hunt {
                 rate: (now - then) as f64 / (now_t - then_t).as_secs_f64(),
                 elapsed_ms: t0.elapsed().as_millis() as u64,
                 gpu: self.on_gpu.load(Ordering::Relaxed),
+                vault_error,
             };
             let _ = self.app.emit("hunt-tick", tick);
         }
@@ -353,9 +372,9 @@ pub fn about(engine: State<Engine>) -> About {
 }
 
 #[tauri::command]
-pub fn hunt_estimate(start: String, end: String, any_case: bool, list: String) -> Result<Estimate, String> {
+pub fn hunt_estimate(start: String, end: String, any_case: bool, list: String, soon_tries: f64) -> Result<Estimate, String> {
     let (pat, words) = plan(&start, &end, any_case, &list)?;
-    Ok(estimate(&pat, &words))
+    Ok(estimate(&pat, &words, soon_tries))
 }
 
 #[tauri::command]
@@ -372,7 +391,7 @@ pub fn hunt_start(
     if vault.lock().unwrap().status() != "open" {
         return Err("Unlock the vault first, so there is somewhere safe to put the key.".into());
     }
-    let numbers = estimate(&pat, &words);
+    let numbers = estimate(&pat, &words, 0.0);
     let run = Arc::new(AtomicBool::new(true));
     if let Some(old) = engine.run.lock().unwrap().replace(run.clone()) {
         old.store(false, Ordering::SeqCst);

@@ -1,6 +1,6 @@
 [package]
 name = "vanityvault"
-version = "0.2.2-preview"
+version = "0.2.3-preview"
 edition = "2021"
 description = "Finds Solana vanity addresses on your own PC"
 license = "AGPL-3.0-only"

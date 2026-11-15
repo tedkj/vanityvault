@@ -58,6 +58,16 @@ fn main() {
             backup::net_answer,
             clip::copy_private,
         ])
-        .run(tauri::generate_context!())
-        .expect("VanityVault failed to start");
+        .build(tauri::generate_context!())
+        .expect("VanityVault failed to start")
+        .run(|app, event| {
+            // Closing the app in the middle of a hunt: stop it, then write any finds that were
+            // still waiting for the vault's next save.
+            if let tauri::RunEvent::Exit = event {
+                app.state::<engine::Engine>().stop();
+                if let Ok(mut vault) = app.state::<engine::SharedVault>().lock() {
+                    let _ = vault.flush();
+                }
+            }
+        });
 }

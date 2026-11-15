@@ -112,6 +112,15 @@ impl Words {
         }
     }
 
+    /// How many finds to expect within the first `tries` keys: for every word and end still
+    /// looked for, the chance that it has turned up by then, added together.
+    pub fn soon(&self, tries: f64) -> f64 {
+        let by_then = |start: &[u8], end: &[u8]| {
+            1.0 - (-tries / Pattern { start: start.to_vec(), end: end.to_vec(), any_case: self.any_case }.mean_tries()).exp()
+        };
+        self.words.iter().map(|w| if w.start { by_then(&w.text, &[]) } else { 0.0 } + if w.end { by_then(&[], &w.text) } else { 0.0 }).sum()
+    }
+
     /// Checks an address against every word by plain comparison and ticks off what it found.
     /// None means it fits no word at all.
     pub fn take(&mut self, addr: &[u8]) -> Option<Taken> {

@@ -5,12 +5,14 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getVersion } from '@tauri-apps/api/app';
 
-export type Tick = { tried: number; rate: number; elapsedMs: number; gpu: boolean };
+// `vaultError` is empty unless writing waiting finds to the vault file just failed.
+export type Tick = { tried: number; rate: number; elapsedMs: number; gpu: boolean; vaultError: string };
 export type Entry = { address: string; prefixLen: number; suffixLen: number; tries: number; at: number };
 // `finds` counts the hunt list finds so far in the running hunt.
 export type Hit = Entry & { saved: boolean; error: string; finds: number };
 // A zero means that part is not in play: `mean` is for the main pattern, `listMean` for the hunt list.
-export type Estimate = { mean: number; words: number; listMean: number };
+// `soon` is how many list finds to expect in the first `soonTries` keys of the hunt.
+export type Estimate = { mean: number; words: number; listMean: number; soon: number };
 // The graphics card: 'starting' while it is set up and checked, 'ready' when hunts use it, 'none' when this PC hunts on the processor.
 export type Card = { state: 'starting' | 'ready' | 'none'; name: string };
 export type About = { threads: number; card: Card };
@@ -37,7 +39,8 @@ function sub<T>(name: string, cb: (p: T) => void): () => void {
 const real = {
   about: () => invoke<About>('about'),
   onAbout: (cb: (a: About) => void) => sub('engine-about', cb),
-  estimate: (start: string, end: string, anyCase: boolean, list: string) => invoke<Estimate>('hunt_estimate', { start, end, anyCase, list }),
+  estimate: (start: string, end: string, anyCase: boolean, list: string, soonTries: number) =>
+    invoke<Estimate>('hunt_estimate', { start, end, anyCase, list, soonTries }),
   start: (start: string, end: string, anyCase: boolean, list: string) => invoke<Estimate>('hunt_start', { start, end, anyCase, list }),
   stop: () => invoke<void>('hunt_stop'),
   onTick: (cb: (t: Tick) => void) => sub('hunt-tick', cb),
@@ -114,13 +117,14 @@ function mock(): typeof real {
   let timer = 0;
   let ready = false;
   const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const est = (s: string, e: string, list: string): Estimate => {
+  const est = (s: string, e: string, list: string, soonTries = 0): Estimate => {
     const words = list.split(/[\s,;]+/).filter(Boolean);
     if (!s && !e && !words.length) throw 'Type at least one character.';
     for (const c of s + e + words.join('')) if (!B58.includes(c)) throw `"${c}" can't appear in a Solana address.`;
     const mean = s || e ? Math.pow(58, e.length) * (s ? 999.3 * Math.pow(58, s.length - 1) : 1) : 0;
     const p = words.reduce((sum, w) => sum + Math.pow(58, -w.length), 0);
-    return { mean, words: words.length, listMean: p ? 1 / p : 0 };
+    const soon = words.reduce((sum, w) => sum + (1 - Math.exp(-soonTries / Math.pow(58, w.length))) + (1 - Math.exp(-soonTries / (17.2 * Math.pow(58, w.length)))), 0);
+    return { mean, words: words.length, listMean: p ? 1 / p : 0, soon };
   };
   const strength = (p: string): Strength => {
     const score = Math.min(4, Math.floor(p.length / 5));
@@ -132,7 +136,7 @@ function mock(): typeof real {
       const id = setTimeout(() => ((ready = true), cb({ threads: 15, card: { state: 'ready', name: 'Preview card (no real keys)' } })), 12000);
       return () => clearTimeout(id);
     },
-    estimate: async (s, e, _c, list) => est(s, e, list),
+    estimate: async (s, e, _c, list, soonTries) => est(s, e, list, soonTries),
     start: async (s, e, _c, list) => {
       const numbers = est(s, e, list);
       const mean = numbers.mean || Infinity;
@@ -156,7 +160,7 @@ function mock(): typeof real {
           finds++;
           findCbs.forEach((cb) => cb({ ...entry, saved: true, error: '', finds }));
         }
-        if (tried < goal) return ticks.forEach((cb) => cb({ tried, rate, elapsedMs: performance.now() - t0, gpu: ready }));
+        if (tried < goal) return ticks.forEach((cb) => cb({ tried, rate, elapsedMs: performance.now() - t0, gpu: ready, vaultError: '' }));
         clearInterval(timer);
         let mid = '';
         for (let i = 0; i < 43 - s.length - e.length; i++) mid += B58[(Math.random() * 58) | 0];
