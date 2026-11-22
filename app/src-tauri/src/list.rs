@@ -53,15 +53,27 @@ fn code(c: u8, any_case: bool) -> u32 {
     pattern::index(pick).map_or(63, |i| i as u32)
 }
 
-/// One table entry: the characters, five per number and six bits each, then the masks.
+/// The most characters one table entry holds.
+const ENTRY_CHARS: usize = 15;
+const _: () = assert!(pattern::MAX_LEN <= ENTRY_CHARS);
+
+/// One table entry: the characters, five per number and six bits each, then how many there are.
 fn entry(codes: impl Iterator<Item = u32>) -> [u32; 4] {
     let mut e = [0u32; 4];
     for (i, c) in codes.enumerate() {
-        let (slot, shift) = (i / 5, 6 * (i % 5) as u32);
-        e[slot] |= c << shift;
-        e[2 + slot] |= 63 << shift;
+        e[i / 5] |= c << (6 * (i % 5));
+        e[3] += 1;
     }
     e
+}
+
+/// The bits of the first `k` characters of one entry number (five or more means all five).
+fn mask(k: u32) -> u32 {
+    if k >= 5 {
+        0x3FFF_FFFF
+    } else {
+        (1 << (6 * k)) - 1
+    }
 }
 
 impl Words {
@@ -156,7 +168,9 @@ impl Words {
         let mut starts: Vec<[u32; 4]> = self.words.iter().filter(|w| w.start).map(|w| entry(codes(w).into_iter())).collect();
         let mut ends: Vec<[u32; 4]> = self.words.iter().filter(|w| w.end).map(|w| entry(codes(w).into_iter().rev())).collect();
         for (list, bits) in [(&mut starts, START_BITS), (&mut ends, END_BITS)] {
-            list.sort_by_key(|e| e[0] & CODE);
+            // By three-character code; within one code the words under five characters first,
+            // then the rest in the order of their fourth and fifth characters.
+            list.sort_unstable_by_key(|e| (e[0] & CODE, e[3] >= 5, e[0] >> 18, e[1], e[2]));
             for e in list.iter() {
                 let c = (e[0] & CODE) as usize;
                 data[bits + c / 32] |= 1 << (c % 32);
@@ -179,7 +193,7 @@ impl Packed {
     /// The same steps as `list_any` in grind.cl.
     pub fn hit(&self, addr: &[u8]) -> bool {
         let len = addr.len();
-        if len < 10 {
+        if len < ENTRY_CHARS {
             return false;
         }
         let d = &self.data;
@@ -211,17 +225,53 @@ impl Packed {
                 hi = mid;
             }
         }
-        let (mut a0, mut a1) = (0u32, 0u32);
+        let (mut a0, mut a1, mut a2) = (0u32, 0u32, 0u32);
         for k in 0..5 {
             a0 |= nth(k) << (6 * k);
             a1 |= nth(5 + k) << (6 * k);
+            a2 |= nth(10 + k) << (6 * k);
         }
+        // The words of under five characters.
         while i < n {
             let e = &entries[4 * i..4 * i + 4];
             if e[0] & CODE != code {
+                return false;
+            }
+            if e[3] >= 5 {
                 break;
             }
-            if ((a0 ^ e[0]) & e[2]) | ((a1 ^ e[1]) & e[3]) == 0 {
+            if (a0 ^ e[0]) & mask(e[3]) == 0 {
+                return true;
+            }
+            i += 1;
+        }
+        // The first word whose five characters are not below the address's: out in doubling
+        // steps, then halving back in.
+        let below = |i: usize| i < n && entries[4 * i] & CODE == code && entries[4 * i] >> 18 < a0 >> 18;
+        if below(i) {
+            let mut step = 1;
+            while below(i + step) {
+                step <<= 1;
+            }
+            let (mut l, mut h) = (i + step / 2 + 1, (i + step).min(n));
+            while l < h {
+                let mid = (l + h) / 2;
+                if below(mid) {
+                    l = mid + 1;
+                } else {
+                    h = mid;
+                }
+            }
+            i = l;
+        }
+        // The words that share all five.
+        while i < n {
+            let e = &entries[4 * i..4 * i + 4];
+            if e[0] != a0 {
+                break;
+            }
+            let k = e[3];
+            if ((a1 ^ e[1]) & mask(k - 5)) | ((a2 ^ e[2]) & mask(k.saturating_sub(10))) == 0 {
                 return true;
             }
             i += 1;

@@ -653,12 +653,19 @@ static int matches_any(const uchar addr[44], int len,
      [128, 8320)       bitmap over the codes of the FIRST three characters of every start word
      [8320, 16512)     bitmap over the codes of the LAST three characters of every end word
      [16512, ...)      npre entries for start words, then nsuf entries for end words
-   An entry is 4 uints: w0, w1, m0, m1. Up to ten characters, 6 bits each, five per uint,
-   counted from the address end the word sits at; m0/m1 mask the characters the word has.
-   Entries are sorted by their three-character code (w0 & 0x3FFFF).
+   An entry is 4 uints: w0, w1, w2, n. Up to fifteen characters, 6 bits each, five per uint,
+   counted from the address end the word sits at; n is how many characters the word has.
+   Entries are sorted by their three-character code (w0 & 0x3FFFF). Within one code the words of
+   under five characters come first, then the rest in the order of their fourth and fifth
+   characters (w0 >> 18), so a long run of words sharing three characters is searched, not walked.
    Almost every key fails the bitmap, so the cost is the same for 5 words or 5000. */
 #define LIST_BITS 128u
 #define LIST_ENTRIES 16512u
+
+/* The bits of the first k characters of one entry uint (k of 5 or more means all five). */
+static uint list_mask(uint k) {
+  return k >= 5u ? 0x3FFFFFFFu : (1u << (6u * k)) - 1u;
+}
 
 static int list_hit(const uchar addr[44], int len, int rev, uint code,
                     __global const uint * restrict LIST, uint base, uint n) {
@@ -668,15 +675,40 @@ static int list_hit(const uchar addr[44], int len, int rev, uint code,
     if ((LIST[base + 4u * mid] & 0x3FFFFu) < code) lo = mid + 1; else hi = mid;
   }
   if (lo >= n || (LIST[base + 4u * lo] & 0x3FFFFu) != code) return 0;
-  uint a0 = 0, a1 = 0;
+  uint a0 = 0, a1 = 0, a2 = 0;
   for (int i = 0; i < 5; i++) {
     a0 |= LIST[addr[rev ? len - 1 - i : i]] << (6 * i);
     a1 |= LIST[addr[rev ? len - 6 - i : 5 + i]] << (6 * i);
+    a2 |= LIST[addr[rev ? len - 11 - i : 10 + i]] << (6 * i);
   }
+  /* The words of under five characters. */
   for (; lo < n; lo++) {
     __global const uint *e = LIST + base + 4u * lo;
-    if ((e[0] & 0x3FFFFu) != code) break;
-    if ((((a0 ^ e[0]) & e[2]) | ((a1 ^ e[1]) & e[3])) == 0u) return 1;
+    if ((e[0] & 0x3FFFFu) != code) return 0;
+    if (e[3] >= 5u) break;
+    if (((a0 ^ e[0]) & list_mask(e[3])) == 0u) return 1;
+  }
+  /* The first word whose five characters are not below the address's: out in doubling steps,
+     then halving back in. */
+  uint top = a0 >> 18;
+#define LIST_BELOW(i) ((i) < n && (LIST[base + 4u * (i)] & 0x3FFFFu) == code && (LIST[base + 4u * (i)] >> 18) < top)
+  if (LIST_BELOW(lo)) {
+    uint step = 1;
+    while (LIST_BELOW(lo + step)) step <<= 1;
+    uint l = lo + (step >> 1) + 1, h = min(lo + step, n);
+    while (l < h) {
+      uint mid = (l + h) >> 1;
+      if (LIST_BELOW(mid)) l = mid + 1; else h = mid;
+    }
+    lo = l;
+  }
+#undef LIST_BELOW
+  /* The words that share all five. */
+  for (; lo < n; lo++) {
+    __global const uint *e = LIST + base + 4u * lo;
+    if (e[0] != a0) break;
+    uint k = e[3];
+    if ((((a1 ^ e[1]) & list_mask(k - 5u)) | ((a2 ^ e[2]) & list_mask(k > 10u ? k - 10u : 0u))) == 0u) return 1;
   }
   return 0;
 }
