@@ -2,7 +2,7 @@
   "name": "vanityvault",
   "private": true,
   "license": "AGPL-3.0-only",
-  "version": "0.2.3-preview",
+  "version": "0.2.4-preview",
   "type": "module",
   "scripts": {
     "dev": "vite",
