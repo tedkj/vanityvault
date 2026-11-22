@@ -23,8 +23,8 @@ To double-check your download, run this in PowerShell. The hash should match the
 page, and the signature should say `Valid`:
 
 ```powershell
-Get-FileHash .\VanityVault_0.2.4-preview_x64-setup.exe
-Get-AuthenticodeSignature .\VanityVault_0.2.4-preview_x64-setup.exe | Format-List
+Get-FileHash .\VanityVault_0.2.5-preview_x64-setup.exe
+Get-AuthenticodeSignature .\VanityVault_0.2.5-preview_x64-setup.exe | Format-List
 ```
 
 ## How your keys stay safe
