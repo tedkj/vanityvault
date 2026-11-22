@@ -14,6 +14,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Once a day: delete accounts nobody has signed in to for 24 months (sweep in src/index.ts).
+  "triggers": { "crons": ["23 3 * * *"] },
   // Per sender address, per minute.
   "ratelimits": [
     { "name": "RL_AUTH", "namespace_id": "4101", "simple": { "limit": 30, "period": 60 } },

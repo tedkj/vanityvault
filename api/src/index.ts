@@ -25,10 +25,13 @@ interface Env {
 }
 
 const MAX_BODY = 600_000;
-const MAX_ENTRIES = 20_000;
+const MAX_ENTRIES = 1000;
 const MAX_PER_CALL = 200;
 const PAGE = 1000;
-const SESSION_SECONDS = 2 * 3600;
+// A session ends after this long without a call; every call starts the time again.
+const SESSION_SECONDS = 12 * 3600;
+// An account nobody has signed in to for this long is deleted, with everything in it.
+const UNUSED_SECONDS = 730 * 86_400;
 const DEFAULT_KDF = { m_kib: 262_144, t: 3, p: 1 };
 
 class Fail extends Error {
@@ -129,6 +132,8 @@ async function open(env: Env, account: string): Promise<string> {
   await env.DB.batch([
     env.DB.prepare('DELETE FROM sessions WHERE expires < ?').bind(t),
     env.DB.prepare('INSERT INTO sessions (token_hash, account_id, expires) VALUES (?, ?, ?)').bind(await sha256(token), account, t + SESSION_SECONDS),
+    // Every sign-in starts the account's 24 months again.
+    env.DB.prepare('UPDATE accounts SET last_seen = ? WHERE id = ?').bind(t, account),
   ]);
   return token;
 }
@@ -137,9 +142,11 @@ function bearer(req: Request): string {
   if (!h.startsWith('Bearer ') || h.length > 100) throw new Fail(401, 'You are signed out. Sign in again.');
   return h.slice(7);
 }
+/** The account behind a live session. Each call moves the session's end SESSION_SECONDS ahead. */
 async function account(req: Request, env: Env): Promise<string> {
-  const row = await env.DB.prepare('SELECT account_id FROM sessions WHERE token_hash = ? AND expires > ?')
-    .bind(await sha256(bearer(req)), now())
+  const t = now();
+  const row = await env.DB.prepare('UPDATE sessions SET expires = ?3 WHERE token_hash = ?1 AND expires > ?2 RETURNING account_id')
+    .bind(await sha256(bearer(req)), t, t + SESSION_SECONDS)
     .first<{ account_id: string }>();
   if (!row) throw new Fail(401, 'You are signed out. Sign in again.');
   return row.account_id;
@@ -272,7 +279,7 @@ const calls: Record<string, (b: Body, env: Env, req: Request) => Promise<unknown
       .bind(id, ids)
       .first<{ total: number; known: number }>();
     if (count!.total - count!.known + new Set(rows.map((r) => r.id)).size > MAX_ENTRIES) {
-      throw new Fail(413, `A backup can hold ${MAX_ENTRIES} keys, and this one is full.`);
+      throw new Fail(413, `VanityCloud holds up to ${MAX_ENTRIES.toLocaleString('en-US')} keys per account, and this one is full.`);
     }
     await env.DB.prepare(
       `INSERT INTO entries (account_id, id, nonce, ct, size, created, updated)
@@ -350,7 +357,22 @@ async function handle(req: Request, env: Env): Promise<Response> {
   return json(200, await calls[call](body as Body, env, req));
 }
 
+/** The daily cleanup: accounts nobody has signed in to for 24 months go, with their keys and sessions. */
+async function sweep(env: Env) {
+  const old = 'SELECT id FROM accounts WHERE last_seen < ?';
+  const cutoff = now() - UNUSED_SECONDS;
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM entries WHERE account_id IN (${old})`).bind(cutoff),
+    env.DB.prepare(`DELETE FROM sessions WHERE account_id IN (${old})`).bind(cutoff),
+    env.DB.prepare('DELETE FROM accounts WHERE last_seen < ?').bind(cutoff),
+  ]);
+}
+
 export default {
+  async scheduled(_event: unknown, env: Env): Promise<void> {
+    await sweep(env);
+  },
+
   async fetch(req: Request, env: Env): Promise<Response> {
     try {
       return await handle(req, env);
