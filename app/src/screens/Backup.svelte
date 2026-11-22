@@ -76,6 +76,14 @@
   // One VanityCloud account per vault: the vault remembers it. Forgetting it is for an account
   // that no longer exists.
   let forgetting = $state(false);
+  // A box that just opened at the bottom of the page: scroll all the way down, so it shows with
+  // room under it instead of below the bottom of the window.
+  const reveal = (node: HTMLElement) => {
+    requestAnimationFrame(() => {
+      const page = node.closest('.screen');
+      page?.scrollTo({ top: page.scrollHeight, behavior: 'smooth' });
+    });
+  };
   const forget = () =>
     run('form', async () => {
       await engine.backupForget();
@@ -147,7 +155,7 @@
 
 {#snippet forgetBox()}
   {#if forgetting}
-    <div class="box">
+    <div class="box forget" use:reveal>
       <b>Forget the account {cloud.remembered} on this PC?</b> This only makes this PC stop remembering it. It does not delete the account: deleting
       takes signing in. If the account still exists, its keys stay in VanityCloud, locked, and the account deletes itself after 24 months without a
       sign-in. Use this when the account is already gone, or you can't get into it any more and want to start a new one.
@@ -247,7 +255,7 @@
       </div>
       <p class="known">
         This vault already has a VanityCloud account, so a new one can't be made here. <button class="link inline" onclick={() => (forgetting = true)}
-          >That account is gone?</button
+          >Forgot both the password and your VanityCloud recovery key?</button
         >
       </p>
       {@render forgetBox()}
@@ -312,8 +320,7 @@
         </button>
         <button class="link" onclick={() => go('forgot')}>Forgot the password? Use your VanityCloud recovery key</button>
         {#if cloud.remembered}
-          <button class="link" onclick={() => (forgetting = true)}>This vault's account ({cloud.remembered}) no longer exists?</button>
-          {@render forgetBox()}
+          <button class="link" onclick={() => (forgetting = true)}>Forgot both the password and your VanityCloud recovery key?</button>
         {:else}
           <button class="link" onclick={() => go('create')}>Create an account instead</button>
         {/if}
@@ -324,6 +331,8 @@
         <button class="link" onclick={() => go('signin')}>Back to sign in</button>
       {/if}
     </div>
+    <!-- Outside the narrow form, so the box is as wide as on the other screens. -->
+    {#if mode === 'signin' && cloud.remembered}{@render forgetBox()}{/if}
   {:else}
     <div class="label">Backup &middot; signed in as {username}</div>
     <h1>Your spare <em class="s">copy.</em></h1>
@@ -618,6 +627,9 @@
   .danger {
     border-color: rgba(255, 93, 93, 0.6);
     color: var(--red);
+  }
+  .box.forget {
+    margin-bottom: 16px;
   }
   .known {
     margin: 14px 0 0;
