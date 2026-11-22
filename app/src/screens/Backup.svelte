@@ -1,24 +1,17 @@
 <script lang="ts">
+  // The VanityCloud account. The keys themselves are backed up, restored and removed in the Vault.
   import { engine, type Entry, type Strength } from '../lib/engine';
-  import Addr from '../lib/Addr.svelte';
   import KeyCard from '../lib/KeyCard.svelte';
   import { prefs } from '../lib/prefs';
+  import { cloud, sync as syncCloud, load } from '../lib/cloud.svelte';
 
-  let {
-    entries,
-    synced = 0,
-    autoErr = '',
-    onChanged,
-    onState,
-  }: { entries: Entry[]; synced?: number; autoErr?: string; onChanged: () => void; onState: (on: boolean) => void } = $props();
+  let { entries, onOpenVault }: { entries: Entry[]; onOpenVault: () => void } = $props();
   let auto = $state(prefs.autoBackup);
 
-  const SHOWN = 200;
   type Mode = 'intro' | 'create' | 'recovery' | 'signin' | 'forgot';
 
-  // null until the core has said whether a session is open.
-  let signedIn = $state<boolean | null>(null);
-  let username = $state('');
+  const signedIn = $derived(cloud.signedIn);
+  const username = $derived(cloud.username);
   let mode = $state<Mode>('intro');
   let panel = $state<'' | 'password' | 'delete'>('');
 
@@ -37,30 +30,26 @@
   let err = $state('');
   let note = $state('');
 
-  let remote = $state<Entry[]>([]);
-  let unreadable = $state(0);
-  let loaded = $state(false);
-  // The address whose only copy is about to be removed from the backup.
-  let asking = $state('');
-
   const setting = $derived(mode === 'create' || mode === 'forgot' || panel === 'password');
   const fresh = $derived(strength.ok && password === confirm);
   const here = $derived(new Set(entries.map((e) => e.address)));
-  const there = $derived(new Set(remote.map((e) => e.address)));
-  const toUpload = $derived(entries.filter((e) => !there.has(e.address)));
-  const toRestore = $derived(remote.filter((e) => !here.has(e.address)));
-  const rows = $derived([...entries, ...toRestore].sort((a, b) => b.at - a.at));
+  const there = $derived(new Set(cloud.remote.map((e) => e.address)));
+  const pcOnly = $derived(entries.filter((e) => !there.has(e.address)).length);
+  const cloudOnly = $derived(cloud.remote.filter((e) => !here.has(e.address)).length);
   const words = ['Too easy to guess', 'Too easy to guess', 'Still weak', 'Good', 'Strong'];
   const keys = (n: number) => `${n} ${n === 1 ? 'key' : 'keys'}`;
 
   $effect(() => {
     sync().then(() => {
-      if (signedIn) load().catch((e) => (err = String(e)));
+      if (cloud.signedIn) load().catch((e) => (err = String(e)));
     });
   });
-  // An automatic backup just ran: show the new state.
+  // The server ended the session: straight to sign-in, with the username filled in.
   $effect(() => {
-    if (synced && signedIn) load().catch((e) => (err = String(e)));
+    if (cloud.ended && cloud.signedIn === false && mode === 'intro') {
+      mode = 'signin';
+      name = cloud.ended;
+    }
   });
   $effect(() => {
     const p = password;
@@ -71,21 +60,8 @@
   });
 
   async function sync() {
-    const s = await engine.backupStatus();
-    signedIn = s.signedIn;
-    username = s.username;
-    onState(s.signedIn);
-    if (!s.signedIn) {
-      remote = [];
-      loaded = false;
-      panel = '';
-    }
-  }
-  async function load() {
-    const l = await engine.backupList();
-    remote = l.entries;
-    unreadable = l.unreadable;
-    loaded = true;
+    await syncCloud();
+    if (!cloud.signedIn) panel = '';
   }
   function clear() {
     password = confirm = current = recoveryIn = err = note = '';
@@ -126,31 +102,13 @@
       await entered();
     });
   async function entered() {
+    // Synced first, so a session that had ended is cleared before the screen leaves sign-in.
+    await sync();
     recoveryOut = '';
     mode = 'intro';
     clear();
-    await sync();
     await load();
   }
-  const upload = (list: Entry[]) =>
-    run('upload', async () => {
-      const n = await engine.backupUpload(list.map((e) => e.address));
-      await load();
-      note = `${keys(n)} locked and stored in VanityCloud.`;
-    });
-  const restore = (list: Entry[]) =>
-    run('restore', async () => {
-      const n = await engine.backupRestore(list.map((e) => e.address));
-      onChanged();
-      note = `${keys(n)} restored to the vault on this PC.`;
-    });
-  const drop = (address: string) =>
-    run('remove', async () => {
-      asking = '';
-      await engine.backupRemove([address]);
-      await load();
-      note = 'Removed from VanityCloud.';
-    });
   const changePassword = () =>
     run('form', async () => {
       await engine.backupPassword(current, password);
@@ -162,12 +120,14 @@
       await engine.backupDeleteAccount(current);
       clear();
       await sync();
+      cloud.ended = '';
       note = 'The backup account and everything in it has been deleted from the VanityCloud server.';
     });
   const signOut = () =>
     run('out', async () => {
       await engine.backupLogout();
       await sync();
+      cloud.ended = '';
     });
   const onEnter = (fn: () => void, ok: boolean) => (e: KeyboardEvent) => e.key === 'Enter' && ok && fn();
 </script>
@@ -266,7 +226,14 @@
       {:else if mode === 'signin'}
         <div class="label">Backup</div>
         <h1>Sign in to your <em class="s">backup.</em></h1>
-        <p class="lead">Your keys are fetched as locked boxes and opened on this PC.</p>
+        {#if cloud.ended}
+          <p class="lead">
+            You were signed out of VanityCloud: a sign-in lasts 2 hours. Nothing was lost. Sign in again to back up and restore keys. Until then, new finds
+            stay in the vault on this PC.
+          </p>
+        {:else}
+          <p class="lead">Your keys are fetched as locked boxes and opened on this PC.</p>
+        {/if}
       {:else}
         <div class="label">Backup &middot; recovery</div>
         <h1>Get back in with your recovery <em class="s">key.</em></h1>
@@ -314,76 +281,31 @@
   {:else}
     <div class="label">Backup &middot; signed in as {username}</div>
     <h1>Your spare <em class="s">copy.</em></h1>
-    <p class="lead">Locked on this PC, stored online. Back up what you want to keep safe; restore it on any PC by signing in.</p>
+    <p class="lead">Locked on this PC, stored online. Back up, restore and remove keys in the Vault, where each key shows where it is kept.</p>
 
     <div class="tiles">
       <div><span class="label">On this PC</span><b>{entries.length}</b></div>
-      <div><span class="label">In VanityCloud</span><b>{loaded ? remote.length : '...'}</b></div>
-      <div class:warn={loaded && toUpload.length > 0}><span class="label">This PC only</span><b>{loaded ? toUpload.length : '...'}</b></div>
+      <div><span class="label">In VanityCloud</span><b>{cloud.loaded ? cloud.remote.length : '...'}</b></div>
+      <div class:warn={cloud.loaded && pcOnly > 0}><span class="label">This PC only</span><b>{cloud.loaded ? pcOnly : '...'}</b></div>
     </div>
 
     <div class="row top">
-      {#if loaded && toUpload.length}
-        <button class="btn pri" disabled={!!busy} onclick={() => upload(toUpload)}>
-          {#if busy === 'upload'}Backing up<span class="dots"></span>{:else}Back up {keys(toUpload.length)}{/if}
-        </button>
-      {/if}
-      {#if loaded && toRestore.length}
-        <button class="btn" disabled={!!busy} onclick={() => restore(toRestore)}>
-          {#if busy === 'restore'}Restoring<span class="dots"></span>{:else}Restore {keys(toRestore.length)} to this PC{/if}
-        </button>
-      {/if}
-      {#if loaded && !toUpload.length && !toRestore.length}
+      <button class="btn pri" onclick={onOpenVault}>{cloud.loaded && (pcOnly || cloudOnly) ? 'Back up or restore in the Vault' : 'Open the Vault'}</button>
+      {#if cloud.loaded && !pcOnly && !cloudOnly}
         <span class="calm mono">{entries.length ? '✓ everything on this PC is also in VanityCloud' : 'nothing to back up yet'}</span>
       {/if}
     </div>
     {#if note}<div class="hint good">{note}</div>{/if}
     {#if err}<div class="hint bad">{err}</div>{/if}
-    {#if autoErr}<div class="hint bad">{autoErr}</div>{/if}
+    {#if cloud.autoErr}<div class="hint bad">{cloud.autoErr}</div>{/if}
     <label class="tick auto">
       <input type="checkbox" checked={auto} onchange={(e) => (prefs.autoBackup = auto = e.currentTarget.checked)} />
       <span>Back up new finds automatically <em>Each upload still shows the Send window first, unless you've chosen to stop showing it.</em></span>
     </label>
-    {#if unreadable}
+    {#if cloud.unreadable}
       <div class="box">
-        <b>{unreadable} {unreadable === 1 ? 'box' : 'boxes'} in the backup could not be opened.</b> They were not made by this account's key or were changed
-        on the VanityCloud server, so the app ignores them.
-      </div>
-    {/if}
-
-    {#if loaded && rows.length}
-      <div class="list">
-        {#each rows.slice(0, SHOWN) as e (e.address)}
-          {@const onPc = here.has(e.address)}
-          {@const inBackup = there.has(e.address)}
-          <div class="item">
-            <div class="a mono"><Addr address={e.address} prefixLen={e.prefixLen} suffixLen={e.suffixLen} /></div>
-            <div class="m mono">
-              <span class="where">
-                <span class="on-label">Encrypted backup on:</span>
-                {#if onPc}<i>{inBackup ? 'this PC' : 'this PC only'}</i>{/if}
-                {#if inBackup}<i>{onPc ? 'VanityCloud' : 'VanityCloud only'}</i>{/if}
-              </span>
-              <span class="acts">
-                {#if !inBackup}<button disabled={!!busy} onclick={() => upload([e])}>back up</button>{/if}
-                {#if !onPc}<button disabled={!!busy} onclick={() => restore([e])}>restore to this PC</button>{/if}
-                {#if inBackup}
-                  <button disabled={!!busy} onclick={() => (onPc ? drop(e.address) : (asking = e.address))}>remove from VanityCloud</button>
-                {/if}
-              </span>
-            </div>
-            {#if asking === e.address}
-              <div class="box">
-                <b>This key is only in VanityCloud.</b> If you remove it, it is gone for good, and anything held by this address is lost.
-                <div class="row">
-                  <button class="btn sm danger" onclick={() => drop(e.address)}>Remove forever</button>
-                  <button class="btn sm" onclick={() => (asking = '')}>Keep it</button>
-                </div>
-              </div>
-            {/if}
-          </div>
-        {/each}
-        {#if rows.length > SHOWN}<div class="more mono">and {rows.length - SHOWN} more, newest shown first</div>{/if}
+        <b>{cloud.unreadable} {cloud.unreadable === 1 ? 'box' : 'boxes'} in the backup could not be opened.</b> They were not made by this account's key or were
+        changed on the VanityCloud server, so the app ignores them.
       </div>
     {/if}
 
@@ -408,7 +330,6 @@
 </div>
 
 {#if panel === 'delete'}
-  {@const cloudOnly = toRestore.length}
   <div class="veil">
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="del-t">
       <div class="label bad">Delete backup account</div>
@@ -634,80 +555,6 @@
     font-style: normal;
     font-size: 13px;
     color: var(--mute);
-  }
-  .list {
-    margin-top: 26px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    max-width: 920px;
-  }
-  .item {
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 13px 18px;
-    background: var(--ink2);
-  }
-  .a {
-    font-size: 14px;
-    color: var(--mute);
-    user-select: text;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .m {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    align-items: center;
-    margin-top: 8px;
-    font-size: 11px;
-  }
-  .where {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .on-label {
-    color: var(--mute);
-    margin-right: 2px;
-  }
-  .where i {
-    font-style: normal;
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid rgba(20, 241, 149, 0.35);
-    color: var(--green);
-  }
-  .acts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .m button {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--mute);
-    padding: 3px 10px;
-    border: 1px solid var(--line2);
-    border-radius: 999px;
-    transition:
-      color 0.2s,
-      border-color 0.2s;
-  }
-  .m button:hover {
-    color: var(--text);
-    border-color: rgba(255, 255, 255, 0.34);
-  }
-  .m button:disabled {
-    opacity: 0.4;
-  }
-  .more {
-    font-size: 11px;
-    color: var(--dim);
-    padding: 6px 4px;
   }
   .box {
     margin-top: 14px;

@@ -4,10 +4,26 @@
   import Addr from '../lib/Addr.svelte';
   import DeleteAll from '../lib/DeleteAll.svelte';
   import { prefs, type VaultSort } from '../lib/prefs';
+  import { cloud, PER_SEND, upload, restore, drop } from '../lib/cloud.svelte';
 
-  let { entries, onHunt, onChanged, onDeleted }: { entries: Entry[]; onHunt: () => void; onChanged: () => void; onDeleted: () => void } =
-    $props();
+  let {
+    entries,
+    onHunt,
+    onBackup,
+    onChanged,
+    onDeleted,
+  }: { entries: Entry[]; onHunt: () => void; onBackup: () => void; onChanged: () => void; onDeleted: () => void } = $props();
   let wiping = $state(false);
+
+  // Where each key is kept. Keys only in VanityCloud are listed too, so this is the one list of
+  // every key; while signed out, the list is the vault on this PC alone.
+  const on = $derived(!!cloud.signedIn && cloud.loaded);
+  const here = $derived(new Set(entries.map((e) => e.address)));
+  const there = $derived(new Set(on ? cloud.remote.map((e) => e.address) : []));
+  const toUpload = $derived(on ? entries.filter((e) => !there.has(e.address)) : []);
+  const toRestore = $derived(on ? cloud.remote.filter((e) => !here.has(e.address)) : []);
+  const all = $derived([...entries, ...toRestore]);
+  const keys = (n: number) => `${n.toLocaleString('en-US')} ${n === 1 ? 'key' : 'keys'}`;
 
   // The order of the list. The word of a key is the part that was hunted for: the longer of its
   // start and its end.
@@ -24,12 +40,13 @@
     const az = (a: Entry, b: Entry) => word(a).toLowerCase().localeCompare(word(b).toLowerCase()) || newest(a, b);
     const longest = (a: Entry, b: Entry) => word(b).length - word(a).length || az(a, b);
     const want = look.trim().toLowerCase();
-    const some = want ? entries.filter((e) => e.address.toLowerCase().includes(want)) : [...entries];
+    const some = want ? all.filter((e) => e.address.toLowerCase().includes(want)) : [...all];
     return some.sort(sort === 'longest' ? longest : sort === 'az' ? az : newest);
   });
 
   // One key at a time can be open for an action.
-  let open = $state<{ address: string; kind: 'secret' | 'saved' | 'delete' | 'error'; text: string } | null>(null);
+  // 'drop' asks before removing a key whose only copy is in VanityCloud.
+  let open = $state<{ address: string; kind: 'secret' | 'saved' | 'delete' | 'drop' | 'error'; text: string } | null>(null);
   let copied = $state('');
   let hideTimer = 0;
 
@@ -76,12 +93,46 @@
   <div class="label">Vault</div>
   <h1>Your <em class="s">keys.</em></h1>
 
-  {#if entries.length === 0}
+  {#if all.length === 0}
     <p class="lead">Nothing here yet. Every address you find is locked in here automatically.</p>
     <button class="btn pri" style="margin-top:28px" onclick={onHunt}>Start a hunt</button>
   {:else}
     <p class="lead">Stored on this PC in one encrypted file. To use an address in a wallet, show its secret key or save its key file.</p>
-    {#if entries.length > 1}
+    {#if on}
+      <div class="cloud">
+        <span class="label">VanityCloud</span>
+        <span class="sum mono">{(all.length - toUpload.length).toLocaleString('en-US')} of {keys(all.length)} backed up</span>
+        <span class="bulk">
+          {#if toUpload.length}
+            <button class="btn sm pri" disabled={!!cloud.busy} onclick={() => upload(toUpload.map((e) => e.address))}>
+              {#if cloud.busy === 'upload'}Backing up<span class="dots"></span>{:else}Back up {keys(toUpload.length)}{/if}
+            </button>
+          {/if}
+          {#if toRestore.length}
+            <button class="btn sm" disabled={!!cloud.busy} onclick={() => restore(toRestore.map((e) => e.address), onChanged)}>
+              {#if cloud.busy === 'restore'}Restoring<span class="dots"></span>{:else}Restore {keys(toRestore.length)} to this PC{/if}
+            </button>
+          {/if}
+          {#if !toUpload.length && !toRestore.length}<span class="calm mono">✓ every key is in both places</span>{/if}
+        </span>
+      </div>
+      {#if toUpload.length > PER_SEND}
+        <div class="hint">
+          That's {keys(toUpload.length)}, so they go up in {Math.ceil(toUpload.length / PER_SEND)} batches of up to {PER_SEND}. The Send window opens once for
+          each batch, so click Send on each one. That's normal.
+        </div>
+      {/if}
+      {#if cloud.note}<div class="hint good">{cloud.note}</div>{/if}
+      {#if cloud.err}<div class="hint bad">{cloud.err}</div>{/if}
+      {#if cloud.autoErr}<div class="hint bad">{cloud.autoErr}</div>{/if}
+    {:else if cloud.ended && !cloud.signedIn}
+      <div class="cloud">
+        <span class="label">VanityCloud</span>
+        <span class="sum mono">signed out: a sign-in lasts 2 hours</span>
+        <span class="bulk"><button class="btn sm pri" onclick={onBackup}>Sign in again</button></span>
+      </div>
+    {/if}
+    {#if all.length > 1}
       <div class="sort">
         <span class="label">Sort</span>
         <div class="seg">
@@ -90,22 +141,39 @@
           <button class:on={sort === 'az'} onclick={() => order('az')}>Word A to Z</button>
         </div>
         <input class="look mono" bind:value={look} placeholder="Find in addresses" maxlength="44" spellcheck="false" autocomplete="off" />
-        {#if look.trim()}<span class="count mono">{shown.length} of {entries.length}</span>{/if}
+        {#if look.trim()}<span class="count mono">{shown.length} of {all.length}</span>{/if}
       </div>
     {/if}
     {#if look.trim() && shown.length === 0}<p class="none">No address in the vault has "{look.trim()}" in it.</p>{/if}
     <div class="list">
       {#each shown as e (e.address)}
         {@const mine = open?.address === e.address ? open : null}
+        {@const onPc = here.has(e.address)}
+        {@const inCloud = there.has(e.address)}
         <div class="item" class:active={!!mine}>
           <div class="a mono"><Addr address={e.address} prefixLen={e.prefixLen} suffixLen={e.suffixLen} /></div>
           <div class="m mono">
-            <span>{when(e.at)} &middot; {big(e.tries)} tries</span>
+            <span class="info">
+              {when(e.at)} &middot; {big(e.tries)} tries
+              {#if on}
+                {#if !onPc}<i class="tag far">VanityCloud only</i>{:else if inCloud}<i class="tag">backed up</i>{:else}<i class="tag dim">this PC only</i>{/if}
+              {/if}
+            </span>
             <span class="acts">
               <button onclick={() => copy(e.address, e.address)}>{copied === e.address ? 'copied' : 'copy address'}</button>
-              <button onclick={() => act(e.address, 'secret', () => engine.secret(e.address))}>show secret key</button>
-              <button onclick={() => act(e.address, 'saved', () => engine.exportFile(e.address))}>save key file</button>
-              <button onclick={() => (close(), (open = { address: e.address, kind: 'delete', text: '' }))}>delete</button>
+              {#if onPc}
+                <button onclick={() => act(e.address, 'secret', () => engine.secret(e.address))}>show secret key</button>
+                <button onclick={() => act(e.address, 'saved', () => engine.exportFile(e.address))}>save key file</button>
+              {:else}
+                <button disabled={!!cloud.busy} onclick={() => restore([e.address], onChanged)}>restore to this PC</button>
+              {/if}
+              {#if on && onPc && !inCloud}<button disabled={!!cloud.busy} onclick={() => upload([e.address])}>back up</button>{/if}
+              {#if inCloud}
+                <button disabled={!!cloud.busy} onclick={() => (onPc ? drop([e.address]) : (close(), (open = { address: e.address, kind: 'drop', text: '' })))}
+                  >remove from VanityCloud</button
+                >
+              {/if}
+              {#if onPc}<button onclick={() => (close(), (open = { address: e.address, kind: 'delete', text: '' }))}>delete</button>{/if}
             </span>
           </div>
 
@@ -127,9 +195,21 @@
             </div>
           {:else if mine?.kind === 'delete'}
             <div class="box warn">
-              <b>Delete this key for good?</b> Anything held by this address is lost unless you have the key somewhere else. This can't be undone.
+              {#if inCloud}
+                <b>Delete this key from this PC?</b> A copy stays in VanityCloud, so you can restore it later.
+              {:else}
+                <b>Delete this key for good?</b> Anything held by this address is lost unless you have the key somewhere else. This can't be undone.
+              {/if}
               <div class="row">
-                <button class="btn sm danger" onclick={() => remove(e.address)}>Delete forever</button>
+                <button class="btn sm danger" onclick={() => remove(e.address)}>{inCloud ? 'Delete from this PC' : 'Delete forever'}</button>
+                <button class="btn sm" onclick={close}>Keep it</button>
+              </div>
+            </div>
+          {:else if mine?.kind === 'drop'}
+            <div class="box warn">
+              <b>This key is only in VanityCloud.</b> If you remove it, it is gone for good, and anything held by this address is lost.
+              <div class="row">
+                <button class="btn sm danger" onclick={() => (close(), drop([e.address]))}>Remove forever</button>
                 <button class="btn sm" onclick={close}>Keep it</button>
               </div>
             </div>
@@ -268,6 +348,60 @@
   .m button:hover {
     color: var(--text);
     border-color: rgba(255, 255, 255, 0.34);
+  }
+  .cloud {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    max-width: 920px;
+    margin-top: 22px;
+    padding: 12px 16px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--ink2);
+  }
+  .sum {
+    font-size: 12px;
+    color: var(--mute);
+  }
+  .bulk {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
+  .calm {
+    font-size: 12px;
+    color: var(--green);
+  }
+  .hint.good {
+    color: var(--green);
+  }
+  .info {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .tag {
+    font-style: normal;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(20, 241, 149, 0.35);
+    color: var(--green);
+  }
+  .tag.dim {
+    border-color: rgba(245, 184, 61, 0.45);
+    color: #f5b83d;
+  }
+  .tag.far {
+    border-color: rgba(25, 211, 243, 0.4);
+    color: var(--cyan);
+  }
+  .m button:disabled {
+    opacity: 0.4;
   }
   .box {
     margin-top: 14px;

@@ -8,16 +8,12 @@
   import NetAsk from './lib/NetAsk.svelte';
   import { engine, win, type About, type Entry, type Status } from './lib/engine';
   import { prefs } from './lib/prefs';
+  import { cloud, sync, load, reset } from './lib/cloud.svelte';
 
   type Tab = 'hunt' | 'vault' | 'backup' | 'faq' | 'about';
   let tab = $state<Tab>('hunt');
   let status = $state<Status | null>(null);
   let entries = $state<Entry[]>([]);
-  let backupOn = $state(false);
-  // Automatic backup of new finds: bumped after each one so the Backup screen reloads, and the
-  // last failure, so a backup that didn't happen is never silent.
-  let synced = $state(0);
-  let autoErr = $state('');
   let about = $state<About>({ threads: 0, card: { state: 'starting', name: '' } });
 
   const refresh = () => engine.list().then((e) => (entries = e));
@@ -26,14 +22,17 @@
   // of hunt list finds are gathered into one upload (one Send window).
   let autoTimer = 0;
   function autoBackup() {
-    if (!backupOn || !prefs.autoBackup) return;
+    if (!cloud.signedIn || !prefs.autoBackup) return;
     clearTimeout(autoTimer);
     autoTimer = window.setTimeout(async () => {
       try {
-        if (await engine.backupUploadNew()) synced++;
-        autoErr = '';
+        if (await engine.backupUploadNew()) await load();
+        cloud.autoErr = '';
       } catch (e) {
-        autoErr = `New finds were not backed up: ${e}`;
+        cloud.autoErr = `New finds were not backed up: ${e}`;
+        // A "Don't send" halfway through still stored the batches before it.
+        await sync().catch(() => {});
+        if (cloud.signedIn) await load().catch(() => {});
       }
     }, 1500);
   }
@@ -55,22 +54,23 @@
 
   function opened() {
     status = 'open';
-    engine.backupStatus().then((s) => (backupOn = s.signedIn));
+    sync().then(() => {
+      if (cloud.signedIn) load().catch((e) => (cloud.err = String(e)));
+    });
     tab = 'hunt';
     refresh();
   }
   // "Delete everything" finished: the vault is gone, so back to making a new one.
   function deleted() {
     entries = [];
-    backupOn = false;
-    autoErr = '';
+    reset();
     tab = 'hunt';
     status = 'none';
   }
   async function lock() {
     await engine.lock();
     entries = [];
-    backupOn = false;
+    reset();
     status = 'locked';
   }
 </script>
@@ -99,7 +99,7 @@
     <nav>
       <button class:on={tab === 'hunt'} onclick={() => (tab = 'hunt')}>Hunt</button>
       <button class:on={tab === 'vault'} onclick={() => (tab = 'vault')}>Vault <span>{entries.length || ''}</span></button>
-      <button class:on={tab === 'backup'} onclick={() => (tab = 'backup')}>Backup <span>{backupOn ? 'on' : 'off'}</span></button>
+      <button class:on={tab === 'backup'} onclick={() => (tab = 'backup')}>Backup <span class:ended={!!cloud.ended}>{cloud.signedIn ? 'on' : cloud.ended ? 'sign in' : 'off'}</span></button>
       <button class:on={tab === 'faq'} onclick={() => (tab = 'faq')}>FAQ</button>
       <button class:on={tab === 'about'} onclick={() => (tab = 'about')}>About</button>
       <div class="eng">
@@ -126,8 +126,8 @@
 
     <main>
       <div class="pane" class:show={tab === 'hunt'}><Hunt {about} onOpenVault={() => (tab = 'vault')} /></div>
-      {#if tab === 'vault'}<div class="pane show"><Vault {entries} onHunt={() => (tab = 'hunt')} onChanged={refresh} onDeleted={deleted} /></div>{/if}
-      {#if tab === 'backup'}<div class="pane show"><Backup {entries} {synced} {autoErr} onChanged={refresh} onState={(on) => (backupOn = on)} /></div>{/if}
+      {#if tab === 'vault'}<div class="pane show"><Vault {entries} onHunt={() => (tab = 'hunt')} onBackup={() => (tab = 'backup')} onChanged={refresh} onDeleted={deleted} /></div>{/if}
+      {#if tab === 'backup'}<div class="pane show"><Backup {entries} onOpenVault={() => (tab = 'vault')} /></div>{/if}
       {#if tab === 'faq'}<div class="pane show"><Faq /></div>{/if}
       {#if tab === 'about'}<div class="pane show"><AboutScreen /></div>{/if}
     </main>
@@ -223,6 +223,9 @@
     font-family: var(--mono);
     font-size: 11px;
     color: var(--dim);
+  }
+  nav button span.ended {
+    color: #f5b83d;
   }
   .eng {
     margin-top: auto;

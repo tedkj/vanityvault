@@ -49,7 +49,7 @@ export const FAQ: Faq = [
         q: 'How long will my word take?',
         a: [
           'The app shows an estimate before you start. As a rough guide on a fast graphics card, a word at the end of the address takes seconds with 5 characters, minutes with 6, hours with 7 and over a week with 8.',
-          'The same word at the start takes about 17 times longer. Turning on “ignore upper/lower case” speeds things up, but the result may come out mixed, like “MooN”.',
+          'The same word at the start usually takes about 17 times longer. Words that begin with a digit from 2 to 9 or a capital A to H are the exception: they are easier at the start. Turning on “ignore upper/lower case” speeds things up, but the result may come out mixed, like “MooN”.',
         ],
       },
       {

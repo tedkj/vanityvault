@@ -22,7 +22,8 @@ export type BackupStatus = { signedIn: boolean; username: string };
 // `unreadable` counts boxes from the server that this account's key does not open or that failed a check.
 export type BackupListing = { entries: Entry[]; unreadable: number };
 // A request the core holds until the user says Send: `raw` is the exact text it will send.
-export type NetAsk = { id: number; path: string; url: string; userAgent: string; signedIn: boolean; raw: string };
+// `part` of `parts`: which batch of a big upload or removal this is (0 of 0 when it is not one).
+export type NetAsk = { id: number; path: string; url: string; userAgent: string; signedIn: boolean; raw: string; part: number; parts: number };
 
 const inTauri = '__TAURI_INTERNALS__' in window;
 
@@ -104,14 +105,27 @@ function mock(): typeof real {
   let asked = 0;
   let trusted = false;
   const fake = (n: number) => btoa(String.fromCharCode(...Array.from({ length: n }, () => Math.floor(Math.random() * 256))));
-  const ask = async (path: string, body: Record<string, unknown>, signedIn = false) => {
+  const ask = async (path: string, body: Record<string, unknown>, signedIn = false, part = 0, parts = 0) => {
     if (trusted) return;
     const id = ++asked;
     const ok = await new Promise<boolean>((r) => {
       answers.set(id, r);
-      askCbs.forEach((cb) => cb({ id, path, url: `https://api.vanityvault.no/v1/${path}`, userAgent: 'VanityVault/preview', signedIn, raw: JSON.stringify(body) }));
+      askCbs.forEach((cb) =>
+        cb({ id, path, url: `https://api.vanityvault.no/v1/${path}`, userAgent: 'VanityVault/preview', signedIn, raw: JSON.stringify(body), part, parts }),
+      );
     });
     if (!ok) throw 'Cancelled. Nothing was sent.';
+  };
+  // As the core: up to 200 keys per request, each batch asked on its own. The batches before a
+  // "Don't send" stay stored.
+  const putBatched = async (add: Entry[]) => {
+    const parts = Math.ceil(add.length / 200);
+    for (let i = 0; i < parts; i++) {
+      const chunk = add.slice(i * 200, i * 200 + 200);
+      await ask('entries/put', { entries: chunk.map(() => ({ id: fake(8), ...box() })) }, true, parts > 1 ? i + 1 : 0, parts > 1 ? parts : 0);
+      remote = [...chunk.filter((e) => !remote.some((r) => r.address === e.address)), ...remote];
+    }
+    return add.length;
   };
   const box = () => ({ nonce: fake(24), ct: fake(48) });
   let timer = 0;
@@ -233,18 +247,12 @@ function mock(): typeof real {
     },
     backupList: async () => (await pause(300), { entries: remote, unreadable: 0 }),
     backupUpload: async (as) => {
-      await ask('entries/put', { entries: as.map(() => ({ id: fake(8), ...box() })) }, true);
-      await pause(500);
-      const add = entries.filter((e) => as.includes(e.address) && !remote.some((r) => r.address === e.address));
-      remote = [...add, ...remote];
-      return as.length;
+      await pause(300);
+      return putBatched(entries.filter((e) => as.includes(e.address)));
     },
     backupUploadNew: async () => {
       const add = entries.filter((e) => !remote.some((r) => r.address === e.address));
-      if (!add.length) return 0;
-      await ask('entries/put', { entries: add.map(() => ({ id: fake(8), ...box() })) }, true);
-      remote = [...add, ...remote];
-      return add.length;
+      return add.length ? putBatched(add) : 0;
     },
     backupRestore: async (as) => {
       const add = remote.filter((r) => as.includes(r.address) && !entries.some((e) => e.address === r.address));

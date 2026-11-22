@@ -249,7 +249,7 @@
         {#if mean}
           About <b>{big(mean)}</b> tries.
           {#if lastRate}Typical wait on this PC: <b>{wait(mean / lastRate)}</b>.{/if}
-          {#if start && mean > 2e9}Letters at the end are much faster to find than letters at the start.{/if}
+          {#if start && mean > 2e9 && !(anyCase ? /^[2-9a-h]/i : /^[2-9A-H]/).test(start)}Letters at the end are much faster to find than letters at the start.{/if}
         {/if}
         {#if words}
           Hunt list: <b>{words}</b> {words === 1 ? 'word' : 'words'}, a find about every

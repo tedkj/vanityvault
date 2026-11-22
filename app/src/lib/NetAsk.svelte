@@ -74,7 +74,11 @@
 
       <div class="mid">
         <div class="req">
-          <div class="req-h"><b>{title}</b><p>{why}</p></div>
+          <div class="req-h">
+            <b>{title}</b>{#if cur.parts > 1}<span class="part mono">batch {cur.part} of {cur.parts}</span>{/if}
+            <p>{why}</p>
+            {#if cur.parts > 1}<p class="part-note">Big jobs go up to 200 keys at a time, so this window opens once for each batch. That's normal.</p>{/if}
+          </div>
           <div class="tabs" role="tablist">
             <button role="tab" aria-selected={view === 'explained'} class:on={view === 'explained'} onclick={() => (view = 'explained')}>Explained</button>
             <button role="tab" aria-selected={view === 'raw'} class:on={view === 'raw'} onclick={() => (view = 'raw')}>Raw &middot; {bytes.toLocaleString('en')} bytes</button>
@@ -216,6 +220,19 @@ Authorization: Bearer (your session pass, hidden){/if}
     margin: 4px 0 0;
     color: var(--mute);
     font-size: 13.5px;
+  }
+  .part {
+    margin-left: 10px;
+    padding: 2px 9px;
+    border: 1px solid rgb(25 211 243 / 0.4);
+    border-radius: 999px;
+    color: var(--cyan);
+    font-size: 11.5px;
+    vertical-align: 2px;
+  }
+  .req-h p.part-note {
+    color: var(--dim);
+    font-size: 12.5px;
   }
   .tabs {
     display: flex;

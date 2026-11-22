@@ -50,6 +50,8 @@ pub struct WireError {
 /// How a request reaches the server, so the transport can be swapped out.
 pub trait Wire: Send {
     fn call(&self, path: &str, token: Option<&str>, body: Value) -> Result<Value, WireError>;
+    /// The calls that follow are batch `part` of `parts` of one big job (0 of 0: not a batch).
+    fn batch(&self, _part: usize, _parts: usize) {}
 }
 
 pub struct Http {
@@ -116,11 +118,13 @@ pub struct Asking {
     inner: Http,
     ask: SharedAsk,
     app: AppHandle,
+    /// Which batch of a big job is being asked about, shown as "batch 3 of 7".
+    batch: Mutex<(usize, usize)>,
 }
 
 impl Asking {
     pub fn new(inner: Http, ask: SharedAsk, app: AppHandle) -> Self {
-        Self { inner, ask, app }
+        Self { inner, ask, app, batch: Mutex::new((0, 0)) }
     }
 
     fn approved(&self, path: &str, token: Option<&str>, raw: &str) -> bool {
@@ -132,7 +136,10 @@ impl Asking {
         let id = self.ask.next.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
         self.ask.pending.lock().unwrap().insert(id, tx);
+        let (part, parts) = *self.batch.lock().unwrap();
         let shown = json!({
+            "part": part,
+            "parts": parts,
             "id": id,
             "path": path,
             "url": format!("{}/v1/{path}", self.inner.base),
@@ -154,6 +161,10 @@ impl Wire for Asking {
             return Err(WireError { status: 0, message: CANCELLED.into() });
         }
         self.inner.send(path, token, &raw)
+    }
+
+    fn batch(&self, part: usize, parts: usize) {
+        *self.batch.lock().unwrap() = (part, parts);
     }
 }
 
@@ -264,6 +275,22 @@ impl Backup {
             }
             e.message
         })
+    }
+
+    /// Sends one call per batch, telling the wire which batch each is, so the Send window can say
+    /// "batch 3 of 7". Stops at the first that fails; the batches before it are stored.
+    fn batched(&mut self, path: &str, calls: Vec<Value>) -> Result<(), String> {
+        let parts = calls.len();
+        let mut done = Ok(());
+        for (i, body) in calls.into_iter().enumerate() {
+            self.wire.batch(if parts > 1 { i + 1 } else { 0 }, if parts > 1 { parts } else { 0 });
+            done = self.call(path, body).map(|_| ());
+            if done.is_err() {
+                break;
+            }
+        }
+        self.wire.batch(0, 0);
+        done
     }
 
     fn start(&mut self, username: String, account_id: String, key: Secret, answer: &Value) -> Result<(), String> {
@@ -427,17 +454,21 @@ impl Backup {
     /// Locks these keys and stores them. A key that is already there is overwritten in place.
     pub fn upload(&mut self, entries: Vec<Entry>) -> Result<usize, String> {
         let (account_id, key) = self.session.as_ref().map(|s| (s.account_id.clone(), s.key.clone())).ok_or("Sign in to your backup first.")?;
-        for chunk in entries.chunks(PER_CALL) {
-            let boxes: Vec<Value> = chunk
-                .iter()
-                .map(|e| {
-                    let id = entry_id(&key, &e.view.address);
-                    let s = seal(&key, &aad(&account_id, &format!("entry/{id}")), &e.plain());
-                    json!({ "id": id, "nonce": s.nonce, "ct": s.ct })
-                })
-                .collect();
-            self.call("entries/put", json!({ "entries": boxes }))?;
-        }
+        let calls: Vec<Value> = entries
+            .chunks(PER_CALL)
+            .map(|chunk| {
+                let boxes: Vec<Value> = chunk
+                    .iter()
+                    .map(|e| {
+                        let id = entry_id(&key, &e.view.address);
+                        let s = seal(&key, &aad(&account_id, &format!("entry/{id}")), &e.plain());
+                        json!({ "id": id, "nonce": s.nonce, "ct": s.ct })
+                    })
+                    .collect();
+                json!({ "entries": boxes })
+            })
+            .collect();
+        self.batched("entries/put", calls)?;
         let n = entries.len();
         if let Some(s) = self.session.as_mut() {
             for e in entries {
@@ -467,10 +498,8 @@ impl Backup {
     /// Removes keys from the backup. The local vault is not touched.
     pub fn remove(&mut self, addresses: &[String]) -> Result<usize, String> {
         let key = self.session.as_ref().map(|s| s.key.clone()).ok_or("Sign in to your backup first.")?;
-        for chunk in addresses.chunks(PER_CALL) {
-            let ids: Vec<String> = chunk.iter().map(|a| entry_id(&key, a)).collect();
-            self.call("entries/delete", json!({ "ids": ids }))?;
-        }
+        let calls = addresses.chunks(PER_CALL).map(|chunk| json!({ "ids": chunk.iter().map(|a| entry_id(&key, a)).collect::<Vec<_>>() })).collect();
+        self.batched("entries/delete", calls)?;
         if let Some(s) = self.session.as_mut() {
             s.remote.retain(|e| !addresses.contains(&e.view.address));
         }
