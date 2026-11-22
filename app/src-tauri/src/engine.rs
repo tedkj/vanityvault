@@ -498,7 +498,8 @@ pub fn vault_export(app: AppHandle, vault: State<SharedVault>, address: String) 
     Ok(vault.lock().unwrap().export_json(&address, &dir)?.display().to_string())
 }
 
-#[tauri::command]
-pub fn vault_delete(vault: State<SharedVault>, address: String) -> Result<(), String> {
-    vault.lock().unwrap().delete(&address)
+/// Deletes these keys from the vault on this PC, writing the vault file once.
+#[tauri::command(async)]
+pub fn vault_delete(vault: State<SharedVault>, addresses: Vec<String>) -> Result<usize, String> {
+    vault.lock().unwrap().delete_many(&addresses)
 }

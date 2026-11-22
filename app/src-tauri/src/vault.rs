@@ -8,6 +8,7 @@
 //! The AAD ties every blob to this vault and to its role, so blobs can't be swapped around.
 //! Nothing in the file is readable without the password or the recovery key, addresses included.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -73,6 +74,10 @@ struct VaultFile {
     key_by_password: Sealed,
     key_by_recovery: Sealed,
     entries: Vec<FileEntry>,
+    /// The username of this vault's VanityCloud account, locked like everything else, so the app
+    /// can steer a forgetful user back to it instead of into a second account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cloud: Option<Sealed>,
 }
 
 /// What the UI may see of a key: everything except the secret.
@@ -325,6 +330,7 @@ impl Vault {
             vault_id,
             kdf,
             entries: Vec::new(),
+            cloud: None,
         };
         Self::write(&self.path, &file)?;
         self.open = Some(Open { file, key, entries: Vec::new(), unsaved: 0, saved_at: None });
@@ -388,6 +394,21 @@ impl Vault {
     pub fn lock(&mut self) {
         let _ = self.flush();
         self.open = None;
+    }
+
+    /// The VanityCloud username this vault remembers, if any (and if the vault is open).
+    pub fn cloud_account(&self) -> Option<String> {
+        let o = self.open.as_ref()?;
+        let plain = unseal(&o.key, &aad(&o.file.vault_id, "cloud"), o.file.cloud.as_ref()?)?;
+        String::from_utf8(plain.to_vec()).ok()
+    }
+
+    /// Remembers this vault's VanityCloud username, or forgets it with None. Writes the file.
+    pub fn set_cloud_account(&mut self, username: Option<&str>) -> Result<(), String> {
+        let path = self.path.clone();
+        let o = self.open.as_mut().ok_or("The vault is locked.")?;
+        o.file.cloud = username.map(|u| seal(&o.key, &aad(&o.file.vault_id, "cloud"), u.as_bytes()));
+        Self::save(&path, o)
     }
 
     pub fn list(&self) -> Vec<EntryView> {
@@ -503,12 +524,19 @@ impl Vault {
         Ok(path)
     }
 
-    pub fn delete(&mut self, address: &str) -> Result<(), String> {
+    /// Deletes these keys and writes the vault file once. Every address must be in the vault, or
+    /// nothing is deleted. Returns how many went.
+    pub fn delete_many(&mut self, addresses: &[String]) -> Result<usize, String> {
         let path = self.path.clone();
         let o = self.open.as_mut().ok_or("The vault is locked.")?;
-        let i = o.entries.iter().position(|s| s.entry.view.address == address).ok_or("That key is not in the vault.")?;
-        let gone = o.entries.remove(i);
-        o.file.entries.retain(|fe| fe.id != gone.id);
-        Self::save(&path, o)
+        let wanted: HashSet<&str> = addresses.iter().map(String::as_str).collect();
+        let gone: HashSet<String> = o.entries.iter().filter(|s| wanted.contains(s.entry.view.address.as_str())).map(|s| s.id.clone()).collect();
+        if gone.len() != wanted.len() {
+            return Err("That key is not in the vault.".into());
+        }
+        o.entries.retain(|s| !gone.contains(&s.id));
+        o.file.entries.retain(|fe| !gone.contains(&fe.id));
+        Self::save(&path, o)?;
+        Ok(gone.len())
     }
 }

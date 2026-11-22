@@ -18,7 +18,8 @@ export type Card = { state: 'starting' | 'ready' | 'none'; name: string };
 export type About = { threads: number; card: Card };
 export type Status = 'none' | 'locked' | 'open';
 export type Strength = { score: number; ok: boolean; hint: string };
-export type BackupStatus = { signedIn: boolean; username: string };
+// `remembered`: the VanityCloud account this vault knows it has ('' for none), signed in or not.
+export type BackupStatus = { signedIn: boolean; username: string; remembered: string };
 // `unreadable` counts boxes from the server that this account's key does not open or that failed a check.
 export type BackupListing = { entries: Entry[]; unreadable: number };
 // A request the core holds until the user says Send: `raw` is the exact text it will send.
@@ -64,7 +65,8 @@ const real = {
   list: () => invoke<Entry[]>('vault_list'),
   secret: (address: string) => invoke<string>('vault_secret', { address }),
   exportFile: (address: string) => invoke<string>('vault_export', { address }),
-  remove: (address: string) => invoke<void>('vault_delete', { address }),
+  // Deletes keys from the vault on this PC; returns how many went.
+  remove: (addresses: string[]) => invoke<number>('vault_delete', { addresses }),
 
   // The online backup. Passwords go to the core, which locks everything before it is sent.
   backupStatus: () => invoke<BackupStatus>('backup_status'),
@@ -73,6 +75,8 @@ const real = {
   backupLogin: (username: string, password: string) => invoke<void>('backup_login', { username, password }),
   backupRecover: (username: string, recoveryKey: string, password: string) => invoke<void>('backup_recover', { username, recoveryKey, password }),
   backupLogout: () => invoke<void>('backup_logout'),
+  // Forgets the remembered account on this PC, for when it no longer exists. Nothing is sent.
+  backupForget: () => invoke<void>('backup_forget'),
   backupList: () => invoke<BackupListing>('backup_list'),
   backupUpload: (addresses: string[]) => invoke<number>('backup_upload', { addresses }),
   // Backs up whatever the vault has that the backup doesn't (for automatic backup of new finds).
@@ -98,6 +102,7 @@ function mock(): typeof real {
   let entries: Entry[] = [];
   let remote: Entry[] = [];
   let user = '';
+  let remembered = '';
   let status: Status = 'none';
   // The stand-in for the core's asking wire: the same questions, with made-up values.
   const askCbs = new Set<(a: NetAsk) => void>();
@@ -122,6 +127,8 @@ function mock(): typeof real {
     const parts = Math.ceil(add.length / 200);
     for (let i = 0; i < parts; i++) {
       const chunk = add.slice(i * 200, i * 200 + 200);
+      if (remote.length + chunk.filter((e) => !remote.some((r) => r.address === e.address)).length > 1000)
+        throw 'VanityCloud holds up to 1,000 keys per account, and this one is full.';
       await ask('entries/put', { entries: chunk.map(() => ({ id: fake(8), ...box() })) }, true, parts > 1 ? i + 1 : 0, parts > 1 ? parts : 0);
       remote = [...chunk.filter((e) => !remote.some((r) => r.address === e.address)), ...remote];
     }
@@ -215,19 +222,22 @@ function mock(): typeof real {
     list: async () => entries,
     secret: async () => 'PreviewOnly' + 'x'.repeat(76),
     exportFile: async (a) => `C:\\Users\\you\\Downloads\\${a}.json`,
-    remove: async (a) => {
-      entries = entries.filter((e) => e.address !== a);
+    remove: async (as) => {
+      const n = entries.length;
+      entries = entries.filter((e) => !as.includes(e.address));
+      return n - entries.length;
     },
 
-    backupStatus: async () => ({ signedIn: !!user, username: user }),
+    backupStatus: async () => ({ signedIn: !!user, username: user, remembered }),
     backupRegister: async (u, p) => {
       await pause(900);
       if (!strength(p).ok) throw 'That password is too easy to guess. Use a longer phrase.';
       if (u.includes('@')) throw "Make up a username instead of using your email address. We don't want to know it.";
       if (u.trim().length < 6) throw 'Usernames have 6 to 32 letters, digits, dots, dashes or underscores.';
       const n = u.trim().toLowerCase();
+      if (remembered) throw `This vault already has a VanityCloud account: ${remembered}. Sign in to it, or use its VanityCloud recovery key.`;
       await ask('register', { account_id: 'e845b209b15a56c46191b43614eee051', username: n, salt: fake(16), kdf: { m_kib: 262144, t: 3, p: 1 }, auth_key: fake(32), wrapped_key: box(), recovery_auth: fake(32), wrapped_key_recovery: box() });
-      user = n;
+      user = remembered = n;
       remote = [];
       return 'B4CK-UP2X-PREV-IEW0-NLY4-NOTA-REAL-KEY7';
     },
@@ -236,14 +246,17 @@ function mock(): typeof real {
       await ask('prelogin', { username: u.trim().toLowerCase() });
       await ask('login', { username: u.trim().toLowerCase(), auth_key: fake(32) });
       if (p !== 'preview') throw 'Wrong username or password.';
-      user = u.trim().toLowerCase();
+      user = remembered = u.trim().toLowerCase();
     },
     backupRecover: async (u) => {
       await pause(900);
-      user = u.trim().toLowerCase();
+      user = remembered = u.trim().toLowerCase();
     },
     backupLogout: async () => {
       user = '';
+    },
+    backupForget: async () => {
+      remembered = '';
     },
     backupList: async () => (await pause(300), { entries: remote, unreadable: 0 }),
     backupUpload: async (as) => {
@@ -268,7 +281,7 @@ function mock(): typeof real {
     },
     backupDeleteAccount: async () => {
       await pause(600);
-      user = '';
+      user = remembered = '';
       remote = [];
     },
     copyPrivate: (text) => navigator.clipboard.writeText(text),

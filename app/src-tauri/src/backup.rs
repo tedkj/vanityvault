@@ -516,27 +516,58 @@ pub type SharedBackup = Mutex<Backup>;
 pub struct Status {
     signed_in: bool,
     username: String,
+    /// The VanityCloud account this vault remembers ('' for none), signed in or not.
+    remembered: String,
 }
 
 #[tauri::command]
-pub fn backup_status(backup: State<SharedBackup>) -> Status {
+pub fn backup_status(backup: State<SharedBackup>, vault: State<SharedVault>) -> Status {
+    let remembered = vault.lock().unwrap().cloud_account().unwrap_or_default();
     let b = backup.lock().unwrap();
-    Status { signed_in: b.username().is_some(), username: b.username().unwrap_or_default().to_string() }
+    Status { signed_in: b.username().is_some(), username: b.username().unwrap_or_default().to_string(), remembered }
+}
+
+/// After a sign-in or a new account: the vault remembers whose account it is. A failed write
+/// doesn't undo the sign-in; the vault just doesn't remember this time.
+fn remember(backup: &State<SharedBackup>, vault: &State<SharedVault>) {
+    let name = backup.lock().unwrap().username().map(str::to_string);
+    if let Some(name) = name {
+        let _ = vault.lock().unwrap().set_cloud_account(Some(&name));
+    }
+}
+
+/// One VanityCloud account per vault: a vault that remembers one sends its user back to it
+/// (sign in, or the VanityCloud recovery key) instead of into a second account.
+#[tauri::command(async)]
+pub fn backup_register(backup: State<SharedBackup>, vault: State<SharedVault>, username: String, password: String) -> Result<String, String> {
+    let known = vault.lock().unwrap().cloud_account();
+    if let Some(known) = known {
+        return Err(format!("This vault already has a VanityCloud account: {known}. Sign in to it, or use its VanityCloud recovery key."));
+    }
+    let recovery = backup.lock().unwrap().register(&username, &password, vault::DEFAULT_KDF)?;
+    remember(&backup, &vault);
+    Ok(recovery)
 }
 
 #[tauri::command(async)]
-pub fn backup_register(backup: State<SharedBackup>, username: String, password: String) -> Result<String, String> {
-    backup.lock().unwrap().register(&username, &password, vault::DEFAULT_KDF)
+pub fn backup_login(backup: State<SharedBackup>, vault: State<SharedVault>, username: String, password: String) -> Result<(), String> {
+    backup.lock().unwrap().login(&username, &password)?;
+    remember(&backup, &vault);
+    Ok(())
 }
 
 #[tauri::command(async)]
-pub fn backup_login(backup: State<SharedBackup>, username: String, password: String) -> Result<(), String> {
-    backup.lock().unwrap().login(&username, &password)
+pub fn backup_recover(backup: State<SharedBackup>, vault: State<SharedVault>, username: String, recovery_key: String, password: String) -> Result<(), String> {
+    backup.lock().unwrap().recover(&username, &recovery_key, &password, vault::DEFAULT_KDF)?;
+    remember(&backup, &vault);
+    Ok(())
 }
 
+/// Forgets the remembered account on this PC, for when it no longer exists (deleted elsewhere, or
+/// unused for 24 months). Nothing is sent.
 #[tauri::command(async)]
-pub fn backup_recover(backup: State<SharedBackup>, username: String, recovery_key: String, password: String) -> Result<(), String> {
-    backup.lock().unwrap().recover(&username, &recovery_key, &password, vault::DEFAULT_KDF)
+pub fn backup_forget(vault: State<SharedVault>) -> Result<(), String> {
+    vault.lock().unwrap().set_cloud_account(None)
 }
 
 #[tauri::command(async)]
@@ -587,6 +618,8 @@ pub fn backup_password(backup: State<SharedBackup>, current: String, password: S
 }
 
 #[tauri::command(async)]
-pub fn backup_delete_account(backup: State<SharedBackup>, password: String) -> Result<(), String> {
-    backup.lock().unwrap().delete_account(&password)
+pub fn backup_delete_account(backup: State<SharedBackup>, vault: State<SharedVault>, password: String) -> Result<(), String> {
+    backup.lock().unwrap().delete_account(&password)?;
+    let _ = vault.lock().unwrap().set_cloud_account(None);
+    Ok(())
 }

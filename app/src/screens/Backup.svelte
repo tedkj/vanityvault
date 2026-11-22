@@ -69,8 +69,21 @@
   }
   function go(m: Mode) {
     mode = m;
+    forgetting = false;
+    if ((m === 'signin' || m === 'forgot') && !name.trim()) name = cloud.remembered;
     clear();
   }
+  // One VanityCloud account per vault: the vault remembers it. Forgetting it is for an account
+  // that no longer exists.
+  let forgetting = $state(false);
+  const forget = () =>
+    run('form', async () => {
+      await engine.backupForget();
+      await sync();
+      forgetting = false;
+      name = '';
+      note = 'Forgotten on this PC. You can make a new VanityCloud account. If the old one still exists, it deletes itself after 24 months without a sign-in.';
+    });
   function open(p: typeof panel) {
     panel = panel === p ? '' : p;
     clear();
@@ -131,6 +144,20 @@
     });
   const onEnter = (fn: () => void, ok: boolean) => (e: KeyboardEvent) => e.key === 'Enter' && ok && fn();
 </script>
+
+{#snippet forgetBox()}
+  {#if forgetting}
+    <div class="box">
+      <b>Forget the account {cloud.remembered} on this PC?</b> This only makes this PC stop remembering it. It does not delete the account: deleting
+      takes signing in. If the account still exists, its keys stay in VanityCloud, locked, and the account deletes itself after 24 months without a
+      sign-in. Use this when the account is already gone, or you can't get into it any more and want to start a new one.
+      <div class="row">
+        <button class="btn sm danger" disabled={!!busy} onclick={forget}>Forget it</button>
+        <button class="btn sm" onclick={() => (forgetting = false)}>Keep it</button>
+      </div>
+    </div>
+  {/if}
+{/snippet}
 
 {#snippet newPassword(placeholder: string)}
   <input class="in" type="password" bind:value={password} {placeholder} />
@@ -213,10 +240,23 @@
     </div>
     {#if note}<div class="hint good">{note}</div>{/if}
     {#if err}<div class="hint bad">{err}</div>{/if}
-    <div class="row top">
-      <button class="btn pri" onclick={() => go('create')}>Create a backup account</button>
-      <button class="btn" onclick={() => go('signin')}>I already have one</button>
-    </div>
+    {#if cloud.remembered}
+      <div class="row top">
+        <button class="btn pri" onclick={() => go('signin')}>Sign in as {cloud.remembered}</button>
+        <button class="btn" onclick={() => go('forgot')}>Forgot the password?</button>
+      </div>
+      <p class="known">
+        This vault already has a VanityCloud account, so a new one can't be made here. <button class="link inline" onclick={() => (forgetting = true)}
+          >That account is gone?</button
+        >
+      </p>
+      {@render forgetBox()}
+    {:else}
+      <div class="row top">
+        <button class="btn pri" onclick={() => go('create')}>Create a backup account</button>
+        <button class="btn" onclick={() => go('signin')}>I already have one</button>
+      </div>
+    {/if}
   {:else if !signedIn}
     <div class="form">
       {#if mode === 'create'}
@@ -228,7 +268,7 @@
         <h1>Sign in to your <em class="s">backup.</em></h1>
         {#if cloud.ended}
           <p class="lead">
-            You were signed out of VanityCloud: a sign-in lasts 2 hours. Nothing was lost. Sign in again to back up and restore keys. Until then, new finds
+            You were signed out of VanityCloud after 12 hours without use. Nothing was lost. Sign in again to back up and restore keys. Until then, new finds
             stay in the vault on this PC.
           </p>
         {:else}
@@ -265,12 +305,18 @@
           {#if busy}Creating<span class="dots"></span>{:else}Create account{/if}
         </button>
         <button class="link" onclick={() => go('signin')}>I already have an account</button>
+        <p class="known">One VanityCloud account per vault: this PC remembers it, so you're steered back to it if you ever forget it.</p>
       {:else if mode === 'signin'}
         <button class="btn pri" disabled={!name.trim() || !password || !!busy} onclick={enter}>
           {#if busy}Signing in<span class="dots"></span>{:else}Sign in{/if}
         </button>
         <button class="link" onclick={() => go('forgot')}>Forgot the password? Use your VanityCloud recovery key</button>
-        <button class="link" onclick={() => go('create')}>Create an account instead</button>
+        {#if cloud.remembered}
+          <button class="link" onclick={() => (forgetting = true)}>This vault's account ({cloud.remembered}) no longer exists?</button>
+          {@render forgetBox()}
+        {:else}
+          <button class="link" onclick={() => go('create')}>Create an account instead</button>
+        {/if}
       {:else}
         <button class="btn pri" disabled={!name.trim() || !recoveryIn.trim() || !fresh || !!busy} onclick={enter}>
           {#if busy}Setting it<span class="dots"></span>{:else}Set new password{/if}
@@ -572,6 +618,17 @@
   .danger {
     border-color: rgba(255, 93, 93, 0.6);
     color: var(--red);
+  }
+  .known {
+    margin: 14px 0 0;
+    max-width: 640px;
+    color: var(--mute);
+    font-size: 13.5px;
+  }
+  .link.inline {
+    display: inline;
+    margin: 0;
+    padding: 0;
   }
   .account {
     margin-top: 40px;

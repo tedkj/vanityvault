@@ -143,10 +143,17 @@ export const FAQ: Faq = [
         ],
       },
       {
+        q: 'How much does VanityCloud keep, and for how long?',
+        a: [
+          'Up to 1,000 keys per account. You choose which ones go: the app never picks for you.',
+          'An account nobody signs in to for 24 months is deleted, with everything in it. Every sign-in starts the 24 months again. The vault on your PC is never touched.',
+        ],
+      },
+      {
         q: 'I forgot my VanityCloud password. What now?',
         a: [
           'Use your VanityCloud recovery key to set a new VanityCloud password. If you lose both, nobody can open the online copy, not even the maker. The vault on your PC isn’t affected.',
-          'There’s no reset email either: VanityCloud never asks for your email (it won’t even accept one as a username), so write your username down too.',
+          'There’s no reset email either: VanityCloud never asks for your email (it won’t even accept one as a username), so write your username down too. Your vault remembers which VanityCloud account it belongs to, so on this PC the app fills in the username for you, and sends you back to that account instead of letting you make a second one by mistake.',
         ],
       },
     ],

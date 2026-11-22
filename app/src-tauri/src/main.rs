@@ -48,6 +48,7 @@ fn main() {
             backup::backup_login,
             backup::backup_recover,
             backup::backup_logout,
+            backup::backup_forget,
             backup::backup_list,
             backup::backup_upload,
             backup::backup_upload_new,

@@ -4,11 +4,15 @@ import { engine, type Entry } from './engine';
 
 // Keys per upload, as PER_CALL in backup.rs: each batch is its own Send window.
 export const PER_SEND = 200;
+// Keys per VanityCloud account, as MAX_ENTRIES in the server (api/src/index.ts).
+export const MAX_CLOUD = 1000;
 
 export const cloud = $state({
   // null until the core has said whether a session is open.
   signedIn: null as boolean | null,
   username: '',
+  // The VanityCloud account this vault remembers, signed in or not ('' for none).
+  remembered: '',
   remote: [] as Entry[],
   // Boxes from the server that this account's key does not open, or that failed a check.
   unreadable: 0,
@@ -19,7 +23,7 @@ export const cloud = $state({
   note: '',
   // The last automatic backup that failed, so a backup that didn't happen is never silent.
   autoErr: '',
-  // The username whose session the server ended (sessions last 2 hours), so the screens can ask
+  // The username whose session the server ended (after 12 hours without use), so the screens can ask
   // to sign in again instead of acting as if backup were off. '' when signed in or signed out on purpose.
   ended: '',
 });
@@ -31,6 +35,7 @@ export async function sync() {
   if (s.signedIn && !cloud.signedIn) cloud.ended = cloud.autoErr = cloud.err = '';
   cloud.signedIn = s.signedIn;
   cloud.username = s.username;
+  cloud.remembered = s.remembered;
   if (!s.signedIn) {
     cloud.remote = [];
     cloud.unreadable = 0;
@@ -47,7 +52,7 @@ export async function load() {
 
 /** Signed out by the app (vault locked or deleted): forget what was shown. */
 export function reset() {
-  Object.assign(cloud, { signedIn: false, username: '', remote: [], unreadable: 0, loaded: false, busy: '', err: '', note: '', autoErr: '', ended: '' });
+  Object.assign(cloud, { signedIn: false, username: '', remembered: '', remote: [], unreadable: 0, loaded: false, busy: '', err: '', note: '', autoErr: '', ended: '' });
 }
 
 const keys = (n: number) => `${n.toLocaleString('en-US')} ${n === 1 ? 'key' : 'keys'}`;
